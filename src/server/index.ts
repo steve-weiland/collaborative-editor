@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { parseRoomFromUrl } from './url.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const PERSIST_DIR = process.env.PERSIST_DIR ?? './data/yjs';
@@ -19,6 +20,7 @@ process.env.YPERSISTENCE = PERSIST_DIR;
 // y-websocket@1.5's package.json exports map publishes the helper as
 // './bin/utils' (without the .js extension), so we import via that path.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+// @ts-ignore
 const utils: any = await import('y-websocket/bin/utils');
 const setupWSConnection: (
   ws: unknown,
@@ -75,20 +77,19 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
-// y-websocket's setupWSConnection wants the bare ws (no path-based room
-// routing). We accept any /ws* path and pin docName='doc' — V2 is single-doc
-// (Q16). The WebsocketProvider on the client resolves to /ws/doc, so the
-// path-prefix match gives us forward compat with multi-doc routing in V2.1.
+// v2.1.0: extract the room name from the URL path; reject malformed names
+// with HTTP 400. /ws → 'doc' (back-compat); /ws/foo → 'foo'.
 const wss = new WebSocketServer({ noServer: true });
 
 httpServer.on('upgrade', (req, socket, head) => {
-  if (!req.url?.startsWith('/ws')) {
-    socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+  const room = parseRoomFromUrl(req.url ?? '');
+  if (room === null) {
+    socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
     socket.destroy();
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
-    setupWSConnection(ws, req, { docName: 'doc', gc: true });
+    setupWSConnection(ws, req, { docName: room, gc: true });
   });
 });
 

@@ -1,10 +1,20 @@
 import * as Y from 'yjs';
 
 /**
+ * Origin tag attached to local-edit transactions. Used by Y.UndoManager's
+ * `trackedOrigins` to scope the undo stack to local ops only — remote
+ * updates from the WebsocketProvider have a different origin (the provider
+ * instance) and are not tracked, so a local Undo never undoes someone
+ * else's edits. (DOC-111, DOC-113)
+ */
+export const localOrigin = Symbol('local-origin');
+
+/**
  * Binds a `<textarea>` to a `Y.Text` so they stay in sync:
  *
  * - Local `input` events become `Y.Text.insert`/`Y.Text.delete` ops via a
- *   prefix-suffix diff.
+ *   prefix-suffix diff. Each local edit is wrapped in a transaction tagged
+ *   with {@link localOrigin} so the UndoManager can scope to local ops.
  * - Remote `Y.Text` ops update the textarea while preserving the user's
  *   cursor position via {@link Y.RelativePosition} (closes V1 F3 — cursor
  *   no longer jumps to position 0 on every remote echo).
@@ -46,7 +56,7 @@ export function bindTextareaToYText(
     ytext.doc!.transact(() => {
       if (removed > 0) ytext.delete(prefix, removed);
       if (inserted.length > 0) ytext.insert(prefix, inserted);
-    });
+    }, localOrigin);
   };
   textarea.addEventListener('input', onInput);
 
@@ -58,15 +68,22 @@ export function bindTextareaToYText(
   let savedRelStart: Y.RelativePosition | null = null;
   let savedRelEnd: Y.RelativePosition | null = null;
 
+  // "Remote-shaped" = anything not produced by the local input handler.
+  // That covers BOTH provider updates from peers AND undo/redo ops produced
+  // by Y.UndoManager (whose origin is the UndoManager instance, not us).
+  // We still need to swap textarea.value and adjust the cursor for those.
+  const isRemoteShaped = (transaction: Y.Transaction): boolean =>
+    transaction.origin !== localOrigin;
+
   const beforeTransaction = (transaction: Y.Transaction): void => {
-    if (transaction.local) return;
+    if (!isRemoteShaped(transaction)) return;
     savedRelStart = Y.createRelativePositionFromTypeIndex(ytext, textarea.selectionStart);
     savedRelEnd = Y.createRelativePositionFromTypeIndex(ytext, textarea.selectionEnd);
   };
   ytext.doc!.on('beforeTransaction', beforeTransaction);
 
   const observer = (_event: Y.YTextEvent, transaction: Y.Transaction): void => {
-    if (transaction.local) return;
+    if (!isRemoteShaped(transaction)) return;
 
     applyingRemote = true;
     try {

@@ -8,34 +8,40 @@ provider.
 
 | | |
 |--|--|
-| **Spec** | [`spec.md`](./spec.md) — RFC-2119 requirements; V1 → V2 failure-mode mapping |
-| **Status** | `v2.0.0` released. F1–F5 V1 failure modes all addressed; F1–F4 locked in by chaos tests that flip from V1's "asserts the bug" to V2's "asserts the fix." |
-| **Stack** | Node.js 20 + TypeScript + Yjs + y-websocket + y-leveldb + Vite + vanilla TS frontend |
+| **Spec** | [`spec.md`](./spec.md) — RFC-2119 requirements; V1 → V2 → v2.1.0 evolution |
+| **Status** | `v2.1.0` released. V1 failure modes F1-F5 addressed in v2.0.0; v2.1.0 stacks **multi-doc routing**, **awareness presence**, **`Y.UndoManager`**, and **y-indexeddb offline-first** on top, locked in by feature tests F8-F11. |
+| **Stack** | Node.js 20 + TypeScript + Yjs + y-websocket + y-leveldb + y-indexeddb + Vite + vanilla TS frontend |
 
 ---
 
-## V2 in 30 seconds
+## v2.1.0 in 30 seconds
 
 ```
-Page A's Y.Doc ──┐                            ┌──> Page B's Y.Doc
-                 │  y-websocket binary (ops)  │
-                 ├──> Server's Y.Doc <────────┤
-                 │       │                    │
-                 │       │ y-leveldb          │
-                 │       ▼                    │
-                 │   ./data/yjs/              │
-                 └────────────────────────────┘
+Page A's Y.Doc ─┐                              ┌─> Page B's Y.Doc
+   │            │  y-websocket binary (ops)    │            │
+   │ y-indexeddb├─> Server's Y.Doc(<room>) <───┤y-indexeddb │
+   │     │      │       │                      │     │      │
+   ▼     ▼      │       │ y-leveldb            │     ▼      ▼
+ IDB:<room>    │       ▼                      │   IDB:<room>
+                │   ./data/yjs/<room>/         │
+                └──────────────────────────────┘
+                  awareness channel: name + color + cursor
 ```
 
-- The document is a `Y.Text` named `'doc'` inside a Y.Doc shared by every
-  client.
-- Local edits become `Y.Text.insert` / `Y.Text.delete` ops (smallest
-  prefix-suffix diff against the current ytext).
-- The y-websocket provider ships ops, runs sync_step1/2 on connect, and
-  reconciles offline ops on reconnect.
-- y-leveldb persists every update so the doc survives server restart.
-- Cursor stays put on remote ops via `Y.RelativePosition` snapshotted
-  before each transaction.
+- **Multi-doc routing** — `/ws/<room>` on the WebSocket; `/#<room>` on the
+  page. Each room is an independent `Y.Doc` on the server, with its own
+  leveldb namespace. Bare `/ws` defaults to room `'doc'`.
+- **Awareness presence** — each client publishes `{ name, color, cursor }`
+  on the y-websocket awareness channel; the footer lists every other
+  client's name + color + cursor offset.
+- **Undo/redo** — `Y.UndoManager` scoped to local ops only via
+  `trackedOrigins`; Ctrl/Cmd+Z never undoes someone else's edits.
+- **Offline-first** — `IndexeddbPersistence` mirrors each room into
+  IndexedDB; a page reload shows the doc immediately, even if the server
+  is unreachable.
+
+(All v2.0.0 mechanics — Yjs CRDT, y-websocket binary protocol, y-leveldb,
+`Y.RelativePosition` cursor preservation — still apply unchanged.)
 
 ## Run it
 
@@ -56,13 +62,17 @@ npm start            # serves frontend + WebSocket on :3001
 ## Tests
 
 ```bash
-npm test             # 11 vitest unit tests covering the diff + Y.Text round-trip
-npm run test:e2e     # 6 Playwright tests on port 3100 (~3s incl. server boot)
+npm test             # 22 vitest unit tests (diff + Y.Text round-trip + URL parsing + presence identity)
+npm run test:e2e     # 10 Playwright tests on port 3100 (~3.5s incl. server boot)
                      #   - 2 baseline browser tests
                      #   - F1 concurrent-edit convergence
                      #   - F2 offline-edit reconciliation
                      #   - F3 cursor preservation under remote ops
                      #   - F4 persistence across server restart
+                     #   - F8 multi-doc isolation (v2.1.0)
+                     #   - F9 awareness presence (v2.1.0)
+                     #   - F10 undo respects remote ops (v2.1.0)
+                     #   - F11 IndexedDB survives reload (v2.1.0)
 npm run typecheck    # tsc --noEmit on both client and server
 ```
 
@@ -84,6 +94,18 @@ boundary. The diff on `tests/e2e/v2-baseline.spec.ts` (renamed from
 | F4 | Server restart wipes the doc | `y-leveldb` writes every Y.Doc update; `bindState` loads on first access | `F4_PersistsAcrossRestart` — spawn server, write, kill (SIGTERM with leveldb flush), respawn, assert doc intact |
 | F5 | Bandwidth scales `O(doc_size × clients × edit_rate)` | y-websocket binary ops carry only the delta (~10–30 bytes per keystroke) | (structural — not separately asserted) |
 
+## v2.1.0 features (F8-F11)
+
+These aren't V1 failure inversions — V2 didn't have them at all. They're
+feature-presence tests that lock in the v2.1.0 surface:
+
+| # | Feature | What the test asserts |
+|---|---------|----------------------|
+| F8 | Multi-doc isolation | Two Yjs clients on `f8-room-a` and `f8-room-b` don't see each other's edits |
+| F9 | Awareness presence | Client B reads `provider.awareness.getStates()` and sees client A's `name + cursor=42` |
+| F10 | Undo respects remote ops | A types `AAA`, B inserts `BBB` at offset 0, A undoes; result is `BBB` (not `''`, not `BBBAAA`) — only A's local origin is on its UndoManager's stack |
+| F11 | IndexedDB survives reload | Page types text, `page.reload()`, asserts text is still there before the WebSocket reconnects |
+
 ## Project layout
 
 ```
@@ -98,14 +120,17 @@ collaborative-editor/
 ├── src/
 │   ├── server/
 │   │   ├── index.ts                 http + ws upgrade + setupWSConnection + leveldb flush on shutdown
+│   │   ├── url.ts                   parseRoomFromUrl (regex-validated /ws/<room>)
 │   │   └── y-websocket-utils.d.ts   tiny type stub for the CommonJS server helper
 │   └── client/
-│       ├── index.html               textarea + status pill
-│       ├── main.ts                  Y.Doc + WebsocketProvider + binding wiring
-│       └── textarea-binding.ts      ~70 lines: prefix-suffix diff + relative-position cursor preservation
+│       ├── index.html               textarea + status pill + room switcher + presence footer
+│       ├── main.ts                  Y.Doc + IndexeddbPersistence + WebsocketProvider + binding/presence/undo wiring
+│       ├── textarea-binding.ts      ~80 lines: prefix-suffix diff + relative-position cursor preservation; exports localOrigin
+│       ├── presence.ts              identity-by-client-ID + awareness publish + footer renderer
+│       └── undo.ts                  Y.UndoManager scoped to localOrigin + Ctrl/Cmd+Z handler
 └── tests/
-    ├── unit/                        vitest: diff + Y.Text round-trip
-    └── e2e/                         playwright: baseline + F1-F4 chaos
+    ├── unit/                        vitest: diff + Y.Text round-trip + URL parser + presence identity
+    └── e2e/                         playwright: baseline + F1-F4 (V1→V2 inversions) + F8-F11 (v2.1.0 features)
 ```
 
 ## Why these decisions
@@ -124,9 +149,25 @@ editor. The binding is ~70 lines; cursor preservation falls out of
 no schema, no service. Postgres / S3 snapshotting is V3 production
 hardening — overkill for V2.
 
-**Single-doc routing in V2.** `setupWSConnection(ws, req, { docName: 'doc' })`
-pins all clients to one shared `Y.Doc` regardless of URL. URL-based
-multi-doc routing is V2.1.
+**Multi-doc via URL path, hash on the page (v2.1.0).** WebSocket
+connects to `/ws/<room>`; the page reads the room from
+`location.hash` (`/#meeting-notes`). Server validates room names against
+`[A-Za-z0-9_-]{1,64}` and rejects others with HTTP 400. Hash changes
+trigger a full page reload — hot-swapping rooms without recreating the
+provider, IndexeddbPersistence, and binding is v2.2.0+.
+
+**Text-only presence in v2.1.0; visual overlays deferred (v2.1.0).**
+The awareness channel is published with `{ name, color, cursor }`; the
+footer shows it as text (`Alice-042 @12`). Visual cursor overlays
+inside the textarea need pixel-from-character-offset measurement
+against a hidden mirror div — real UI work, deferred to v2.2.0.
+
+**`Y.UndoManager` scoped to local origin (v2.1.0).** Local-edit
+transactions are tagged with a module-level `localOrigin` symbol
+(exported from `textarea-binding.ts`); the UndoManager's
+`trackedOrigins: new Set([localOrigin])` keeps remote ops out of the
+undo stack. F10 (`A types 'AAA', B types 'BBB' before, A undoes → 'BBB'`)
+is the load-bearing assertion.
 
 **`beforeTransaction` cursor capture, not in-observe.** The naive cursor-
 preservation pattern (capture relative position inside the `observe`
@@ -142,8 +183,8 @@ test that catches it.
 |---------|-------|-------|
 | `v1.0.0` ✅ | Naive baseline | WebSocket + last-write-wins + in-memory + single doc. F1 chaos test asserts divergence. |
 | `v2.0.0` ✅ | CRDT + persistence | Yjs + y-websocket + y-leveldb. F1 inverted to converge; F2 offline reconcile; F3 cursor preserved; F4 persist across restart. |
-| `v2.1.0` | Stretch | Multi-document / rooms via URL path; presence cursors over the awareness channel; undo/redo with `Y.UndoManager`; offline-first IndexedDB persistence. |
-| `v2.2.0` | Portfolio | Deploy to Fly.io / Railway with a public URL. |
+| `v2.1.0` ✅ | Multi-doc + presence + undo + offline-first | Room routing (`/ws/<room>`, `/#<room>`); awareness footer; `Y.UndoManager`; `y-indexeddb`. F8-F11 feature tests. |
+| `v2.2.0` | Portfolio | Visual cursor overlays; user-supplied names; deploy to Fly.io / Railway with a public URL. |
 | `v3.0.0` | Editor upgrade | CodeMirror 6 + `y-codemirror.next` if the textarea ergonomics become limiting. |
 
 ## Reading

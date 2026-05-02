@@ -6,6 +6,9 @@ export default defineConfig({
   build: {
     outDir: '../../dist/client',
     emptyOutDir: true,
+    // ES2022 enables top-level await (used in main.ts to wait on
+    // IndexeddbPersistence.synced before binding the textarea).
+    target: 'es2022',
   },
   server: {
     port: 5173,

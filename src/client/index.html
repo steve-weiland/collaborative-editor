@@ -3,21 +3,37 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Collaborative Editor — V1</title>
+    <title>Collaborative Editor — V2.1</title>
     <style>
       :root { color-scheme: light dark; }
       * { box-sizing: border-box; }
       html, body { height: 100%; margin: 0; }
       body { display: flex; flex-direction: column; font: 14px/1.4 system-ui, sans-serif; }
-      header {
+      header, footer {
         padding: 6px 12px;
-        border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+        border-color: color-mix(in srgb, currentColor 12%, transparent);
         display: flex;
         align-items: center;
-        justify-content: space-between;
         gap: 12px;
       }
+      header { border-bottom: 1px solid; justify-content: space-between; }
+      footer { border-top: 1px solid; flex-wrap: wrap; min-height: 28px; }
       header strong { font-weight: 600; }
+      .room {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 2px 6px;
+        border-radius: 4px;
+        background: color-mix(in srgb, currentColor 8%, transparent);
+      }
+      input[type="text"] {
+        font: inherit;
+        padding: 2px 6px;
+        border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+        width: 14ch;
+      }
       .status {
         display: inline-flex;
         align-items: center;
@@ -27,7 +43,7 @@
         font-size: 12px;
         background: color-mix(in srgb, currentColor 8%, transparent);
       }
-      .dot { width: 8px; height: 8px; border-radius: 50%; background: gray; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: gray; display: inline-block; }
       .dot.connected { background: #2c8; }
       .dot.disconnected { background: #c44; }
       textarea {
@@ -41,17 +57,30 @@
         background: transparent;
         color: inherit;
       }
+      #presence { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+      #presence li { display: inline-flex; align-items: center; gap: 6px; }
+      #presence li.empty { color: color-mix(in srgb, currentColor 50%, transparent); }
     </style>
   </head>
   <body>
     <header>
-      <strong>Collaborative Editor — V2</strong>
-      <span class="status">
-        <span id="status-dot" class="dot"></span>
-        <span id="status-text">connecting…</span>
-      </span>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <strong>Collaborative Editor — V2.1</strong>
+        <span class="room" id="room-label">room: doc</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <input type="text" id="room-input" placeholder="switch room…" aria-label="switch room" />
+        <span class="status">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">connecting…</span>
+        </span>
+      </div>
     </header>
-    <textarea id="editor" placeholder="Start typing. Open a second tab — concurrent edits merge cleanly via the CRDT."></textarea>
+    <textarea id="editor" placeholder="Start typing. Open a second tab — concurrent edits merge cleanly via the CRDT. Try /#another-room for a different doc."></textarea>
+    <footer>
+      <span style="font-size:12px; color:color-mix(in srgb, currentColor 50%, transparent);">others here:</span>
+      <ul id="presence"></ul>
+    </footer>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

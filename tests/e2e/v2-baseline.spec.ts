@@ -22,19 +22,20 @@ async function waitConnected(page: Page): Promise<void> {
 
 /**
  * Open a Node-side Y.Doc + WebsocketProvider against the running server.
- * `textKey` selects which {@link Y.Text} inside the shared `Y.Doc('doc')`
- * the test uses — Node-side chaos tests pass unique keys so they don't
- * share state with the page-bound `'doc'` key or with each other.
+ * `room` selects the y-websocket room (server URL path → docName); each
+ * test uses a unique room so its server-side Y.Doc is independent of
+ * other tests'. The Y.Text key inside the doc is always `'doc'` to match
+ * the page-bound default.
  */
-function openYjsClient(textKey: string = 'doc', port: number = PORT): {
+function openYjsClient(room: string = 'doc', port: number = PORT): {
   ydoc: Y.Doc;
   ytext: Y.Text;
   provider: WebsocketProvider;
   synced: Promise<void>;
 } {
   const ydoc = new Y.Doc();
-  const ytext = ydoc.getText(textKey);
-  const provider = new WebsocketProvider(`ws://localhost:${port}/ws`, 'doc', ydoc, {
+  const ytext = ydoc.getText('doc');
+  const provider = new WebsocketProvider(`ws://localhost:${port}/ws`, room, ydoc, {
     // y-websocket uses the global WebSocket by default; in Node we hand it `ws`.
     WebSocketPolyfill: NodeWebSocket as unknown as typeof WebSocket,
   });
@@ -108,7 +109,7 @@ test.describe('V2 baseline', () => {
  */
 test.describe('F1 — concurrent edits (V2 CRDT)', () => {
   test('two clients editing concurrently converge to a merged document', async () => {
-    // Unique Y.Text key isolates this test from the page-bound 'doc' key.
+    // Unique room isolates this test from the page-bound 'doc' room.
     const a = openYjsClient('f1-test');
     const b = openYjsClient('f1-test');
     try {
@@ -301,5 +302,141 @@ test.describe('F4 — persists across server restart', () => {
     } finally {
       await killServer(server);
     }
+  });
+});
+
+/* ─── F8 — multi-doc isolation (v2.1.0) ──────────────────────────────────── */
+
+test.describe('F8 — multi-doc isolation', () => {
+  test('different rooms hold independent documents', async () => {
+    const a = openYjsClient('f8-room-a');
+    const b = openYjsClient('f8-room-b');
+    try {
+      await Promise.all([a.synced, b.synced]);
+
+      a.ytext.insert(0, 'in room A');
+      // Settle: nothing should arrive at B because B is on a different room.
+      await new Promise((r) => setTimeout(r, 250));
+
+      expect(a.ytext.toString()).toBe('in room A');
+      expect(b.ytext.toString()).toBe('');
+
+      b.ytext.insert(0, 'in room B');
+      await new Promise((r) => setTimeout(r, 250));
+
+      expect(a.ytext.toString()).toBe('in room A');
+      expect(b.ytext.toString()).toBe('in room B');
+    } finally {
+      a.provider.destroy();
+      b.provider.destroy();
+    }
+  });
+});
+
+/* ─── F9 — awareness exposes other clients' cursors (v2.1.0) ─────────────── */
+
+test.describe('F9 — awareness presence', () => {
+  test('client B sees client A\'s name + cursor over the awareness channel', async () => {
+    const a = openYjsClient('f9-room');
+    const b = openYjsClient('f9-room');
+    try {
+      await Promise.all([a.synced, b.synced]);
+
+      a.provider.awareness.setLocalStateField('name', 'A');
+      a.provider.awareness.setLocalStateField('color', '#abcdef');
+      a.provider.awareness.setLocalStateField('cursor', 42);
+
+      // Wait until B's awareness map contains A.
+      await waitFor(
+        () => {
+          for (const [clientId, state] of b.provider.awareness.getStates()) {
+            if (clientId === b.provider.awareness.clientID) continue;
+            const s = state as { name?: string; cursor?: number };
+            if (s.name === 'A' && s.cursor === 42) return true;
+          }
+          return false;
+        },
+        5_000,
+        'B sees A in awareness',
+      );
+
+      // Spot-check: B doesn't see anyone but A.
+      const others: Array<{ name?: string; cursor?: number }> = [];
+      for (const [clientId, state] of b.provider.awareness.getStates()) {
+        if (clientId === b.provider.awareness.clientID) continue;
+        others.push(state as { name?: string; cursor?: number });
+      }
+      expect(others).toHaveLength(1);
+      expect(others[0].name).toBe('A');
+      expect(others[0].cursor).toBe(42);
+    } finally {
+      a.provider.destroy();
+      b.provider.destroy();
+    }
+  });
+});
+
+/* ─── F10 — local undo respects remote ops (v2.1.0) ──────────────────────── */
+
+test.describe('F10 — Y.UndoManager scoped to local origin', () => {
+  test('A undoing only reverts A\'s edits — B\'s ops survive', async () => {
+    const a = openYjsClient('f10-room');
+    const b = openYjsClient('f10-room');
+    try {
+      await Promise.all([a.synced, b.synced]);
+
+      // A's UndoManager only tracks transactions tagged with this origin.
+      // B's edits arrive via the provider with a different origin, so the
+      // UndoManager doesn't see them.
+      const aLocalOrigin = Symbol('A-local');
+      const um = new Y.UndoManager(a.ytext, { trackedOrigins: new Set([aLocalOrigin]) });
+      try {
+        a.ydoc.transact(() => a.ytext.insert(0, 'AAA'), aLocalOrigin);
+        await waitFor(() => b.ytext.toString() === 'AAA', 5_000, 'B sees AAA');
+
+        b.ytext.insert(0, 'BBB');
+        await waitFor(() => a.ytext.toString() === 'BBBAAA', 5_000, 'A sees BBBAAA');
+
+        // A undoes — AAA reverts; BBB survives because it's a remote op
+        // and not on the UndoManager's local stack.
+        um.undo();
+
+        expect(a.ytext.toString()).toBe('BBB');
+        await waitFor(() => b.ytext.toString() === 'BBB', 5_000, 'B sees BBB after undo');
+      } finally {
+        um.destroy();
+      }
+    } finally {
+      a.provider.destroy();
+      b.provider.destroy();
+    }
+  });
+});
+
+/* ─── F11 — IndexedDB survives page reload (v2.1.0) ──────────────────────── */
+
+test.describe('F11 — IndexedDB persists across page reload', () => {
+  test('typed text survives a reload', async ({ page }) => {
+    // Unique per-run hash so we don't trip over stale IndexedDB from earlier
+    // runs in the same Playwright browser context.
+    const room = `f11-${Date.now()}`;
+    await page.goto(`/#${room}`);
+    await waitConnected(page);
+
+    const text = 'preserved across reload';
+    await page.locator('#editor').fill(text);
+    await page.waitForFunction(
+      (t) => (document.getElementById('editor') as HTMLTextAreaElement).value === t,
+      text,
+    );
+    // Let IndexeddbPersistence flush.
+    await page.waitForTimeout(300);
+
+    await page.reload();
+    await page.waitForFunction(
+      (t) => (document.getElementById('editor') as HTMLTextAreaElement).value === t,
+      text,
+      { timeout: 5_000 },
+    );
   });
 });
