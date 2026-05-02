@@ -3,16 +3,33 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { isClientMessage, type DocMessage } from '../shared/messages.js';
-import { DocumentState } from './state.js';
-import { broadcast } from './broadcast.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
+const PERSIST_DIR = process.env.PERSIST_DIR ?? './data/yjs';
 
-const state = new DocumentState();
+// y-websocket/bin/utils inspects YPERSISTENCE at module-load time and binds
+// y-leveldb if it's set, so the env var MUST be set before the dynamic
+// import below evaluates the module.
+fs.mkdirSync(PERSIST_DIR, { recursive: true });
+process.env.YPERSISTENCE = PERSIST_DIR;
 
-// __dirname-equivalent in ESM. In production the compiled file lives at
-// dist/server/server/index.js; the Vite-built frontend lives at dist/client/.
+// Dynamic import so the YPERSISTENCE assignment above runs first. The /bin
+// helpers ship as CommonJS in y-websocket@1.5; ESM interop yields the
+// exports under both `default` and named.
+// y-websocket@1.5's package.json exports map publishes the helper as
+// './bin/utils' (without the .js extension), so we import via that path.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const utils: any = await import('y-websocket/bin/utils');
+const setupWSConnection: (
+  ws: unknown,
+  req: http.IncomingMessage,
+  opts?: { docName?: string; gc?: boolean },
+) => void = utils.setupWSConnection ?? utils.default?.setupWSConnection;
+
+if (typeof setupWSConnection !== 'function') {
+  throw new Error('y-websocket/bin/utils.js did not export setupWSConnection');
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const STATIC_ROOT = path.resolve(__dirname, '../../client');
@@ -38,7 +55,6 @@ const httpServer = http.createServer((req, res) => {
   if (pathname === '/') pathname = '/index.html';
 
   const filePath = path.join(STATIC_ROOT, pathname);
-  // Cheap path-traversal guard.
   if (!filePath.startsWith(STATIC_ROOT)) {
     res.writeHead(403).end();
     return;
@@ -59,63 +75,49 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
-// WebSocket server attached manually via the HTTP upgrade event so that
-// non-/ws upgrade attempts get a clean 404 rather than being accepted.
+// y-websocket's setupWSConnection wants the bare ws (no path-based room
+// routing). We accept any /ws* path and pin docName='doc' — V2 is single-doc
+// (Q16). The WebsocketProvider on the client resolves to /ws/doc, so the
+// path-prefix match gives us forward compat with multi-doc routing in V2.1.
 const wss = new WebSocketServer({ noServer: true });
 
 httpServer.on('upgrade', (req, socket, head) => {
-  if (req.url !== '/ws') {
+  if (!req.url?.startsWith('/ws')) {
     socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
     socket.destroy();
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit('connection', ws, req);
-  });
-});
-
-wss.on('connection', (ws) => {
-  // DOC-12: send the current state on connect.
-  const initial: DocMessage = { type: 'doc', text: state.text() };
-  ws.send(JSON.stringify(initial));
-  console.log(`[connect] clients=${wss.clients.size}`);
-
-  ws.on('message', (raw) => {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw.toString());
-    } catch {
-      // DOC-16: log + ignore.
-      console.warn('[malformed] non-JSON');
-      return;
-    }
-    if (!isClientMessage(parsed)) {
-      console.warn('[malformed] not a ClientMessage');
-      return;
-    }
-    // DOC-13: overwrite state, broadcast to others.
-    state.setText(parsed.text);
-    broadcast(state.text(), ws, wss.clients);
-  });
-
-  ws.on('close', () => {
-    console.log(`[disconnect] clients=${wss.clients.size}`);
-  });
-
-  ws.on('error', (err) => {
-    console.warn('[ws-error]', err.message);
+    setupWSConnection(ws, req, { docName: 'doc', gc: true });
   });
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`collaborative-editor V1 listening on :${PORT}`);
+  console.log(`collaborative-editor V2 listening on :${PORT} persist=${PERSIST_DIR}`);
 });
 
-// Graceful shutdown so `npm run dev`'s tsx --watch can restart cleanly.
-function shutdown(): void {
+// On SIGTERM/SIGINT we MUST flush y-leveldb's pending writes before exiting,
+// otherwise updates that were `storeUpdate`-ed asynchronously can be lost
+// (their underlying `level.put` resolves after we've already process.exit()ed).
+// Without this, F4 — persists across server restart — hits a race where the
+// new server boots a doc that's missing the last few keystrokes.
+async function shutdown(): Promise<void> {
   console.log('shutting down');
   wss.clients.forEach((c) => c.terminate());
-  httpServer.close(() => process.exit(0));
+  await new Promise<void>((res) => httpServer.close(() => res()));
+  try {
+    const persistence = utils.getPersistence?.();
+    const provider = persistence?.provider;
+    if (provider?.flushDocument) {
+      await provider.flushDocument('doc');
+    }
+    if (provider?.destroy) {
+      await provider.destroy();
+    }
+  } catch (e) {
+    console.warn('persistence flush failed', e);
+  }
+  process.exit(0);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

@@ -1,35 +1,35 @@
-# Real-Time Collaborative Editor — V1
+# Real-Time Collaborative Editor
 
 | Field   | Value         |
 |---------|---------------|
-| Version | 0.1 (draft)   |
+| Version | 0.2 (draft)   |
 | Author  | Steve Weiland |
-| Date    | 2026-05-01    |
+| Date    | 2026-05-02    |
 | Status  | Draft         |
 
 ---
 
 ## 1. Overview
 
-V1 is a deliberately-naive WebSocket-driven shared text editor. One process, one
-hardcoded document, multiple browser tabs. Every keystroke ships the **full
-current document text** to the server; the server overwrites its in-memory
-state and broadcasts the new full text to all other connected tabs, which
-replace their `<textarea>` value on receipt. The conflict-resolution model is
-**last-write-wins on the entire document** — whoever's edit reaches the server
-most recently wins; everyone else's keystrokes between are silently lost.
+This spec is layered: V1 introduced a deliberately-broken WebSocket pipeline
+with last-write-wins on the entire document, in-memory state, and a fixed
+1 s reconnect that lost any locally-typed text. V2 fixes the five V1
+failure modes with three mechanisms:
 
-V1 works fine for one user typing in one tab, or two tabs taking strict turns.
-It demonstrably fails under concurrent edits (F1), network blips (F2),
-echo round-trips during fast typing (F3), and server restarts (F4); bandwidth
-also scales badly with document size and client count (F5). Each failure is
-the documented entry point for a V2 fix.
+1. **CRDT state** — the server holds a `Y.Doc` containing a `Y.Text` named
+   `doc`. Concurrent operations commute; there is no LWW.
+2. **Operation-based wire protocol** — the y-websocket binary protocol
+   exchanges sync_step messages (state-vector ↔ delta) and awareness frames;
+   on every local Y.Text op the provider ships only the changed bytes.
+3. **Persistence + reconnect-with-state-sync** — `y-leveldb` writes Y.Doc
+   updates to disk; on client reconnect the WebsocketProvider runs
+   sync_step1 against the persisted state and applies the delta.
 
-V2 will replace the LWW string with a **CRDT** (Yjs or Automerge), the
-"send full doc" wire protocol with **operation-based diffs**, and add
-**persistence** + **reconnect-with-state-sync**. The portfolio asset is
-eventually a deployable live demo (Fly.io / Railway target), but deployment
-itself is V2+ work.
+Each of F1–F4 has an inverted chaos test in V2; F5 is structurally fixed
+by the protocol change and is not separately asserted.
+
+The portfolio milestone is a deployable live demo (Fly.io / Railway target),
+which is V2.1+ work — V2 lands the correctness and persistence machinery.
 
 ---
 
@@ -38,16 +38,18 @@ itself is V2+ work.
 | Term | Definition |
 |------|------------|
 | Document | The single shared piece of text being edited |
-| Document state | The server's in-memory `string` representing the latest known document text |
-| Last-write-wins (LWW) | Conflict resolution rule used in V1: whoever writes most recently overwrites prior state, regardless of what was overwritten |
-| Edit message | Client → server message carrying the full current textarea value |
-| Doc message | Server → client message carrying the full current document state |
-| Broadcast | Sending a `doc` message to every connected client other than the original sender |
-| Echo | The cross-tab effect: an edit from tab A is broadcast to tab B, where it can land mid-keystroke and force a textarea replace; not echoed back to A in V1 |
-| Divergence | Two clients whose textarea values differ and whose subsequent edits cannot reconcile under LWW |
-| Reconnect | Client behavior after the WebSocket drops: reopen the socket and accept whatever state the server sends |
-| CRDT | *(V2)* Conflict-free Replicated Data Type — a data structure whose concurrent operations commute, eliminating the need for LWW. Yjs and Automerge are the two leading text-CRDT libraries |
-| Operation-based sync | *(V2)* Wire protocol that ships the *change* (insert character at offset N) rather than the entire post-change document |
+| Last-write-wins (LWW) | *(V1)* Conflict resolution rule: whoever writes most recently overwrites prior state. **Replaced in V2 by CRDT merge.** |
+| CRDT | Conflict-free Replicated Data Type — a data structure whose concurrent operations commute. V2 uses Yjs. |
+| `Y.Doc` | A Yjs document container; holds one or more shared types. The server and each client hold their own `Y.Doc` instance synchronized via the y-websocket protocol. |
+| `Y.Text` | A Yjs shared type representing a sequence of text with operation-based concurrent editing. The document's text lives in `ydoc.getText('doc')`. |
+| Op | An insert-at-offset or delete-at-offset operation on `Y.Text`. The unit of synchronization in V2. |
+| Sync step | y-websocket sync protocol exchange: step1 sends a state vector, step2 returns the missing updates, step3 acks. Drives initial state load and reconnect reconciliation. |
+| Awareness | y-websocket sub-protocol for ephemeral per-client state (e.g., presence cursors). Not used in V2 but the channel is present for V2.1. |
+| Update message | Binary y-websocket frame carrying one or more ops; what the client and server exchange after the initial sync. |
+| Relative position | Yjs cursor representation that survives concurrent ops — converts to/from an absolute offset against a `Y.Doc`'s current state. |
+| `y-websocket` | Yjs's standard WebSocket transport. Server-side `setupWSConnection` handles per-doc state + per-client framing; client-side `WebsocketProvider` handles connect / sync / reconnect. |
+| `y-leveldb` | Yjs's LevelDB persistence adapter. Loads a `Y.Doc` from disk on first access; persists every update. |
+| Reconnect | Client behavior after a WebSocket drop: reopen, run sync_step1, apply server delta, ship local ops. Local edits made while offline are preserved by the CRDT and reconciled on reconnect. |
 
 ---
 
@@ -62,39 +64,37 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords:
 |----|-------------|
 | DOC-01 | The system **MUST** consist of a single Node.js backend process and any number of browser clients. |
 | DOC-02 | The backend **MUST** expose a WebSocket endpoint at `/ws` and serve the built frontend bundle from the HTTP root `/`. |
-| DOC-03 | V1 **MUST** support a single hardcoded document; document IDs and multi-document routing are out of scope. |
+| DOC-03 | V2 **MUST** support a single hardcoded document keyed `doc`; document IDs and multi-document routing are out of scope (V2.1+). |
 
 ### 3.2 Backend
 
 | ID | Requirement |
 |----|-------------|
 | DOC-10 | The backend **MUST** accept WebSocket upgrades on `/ws`. |
-| DOC-11 | The backend **MUST** keep a single in-memory `state.text: string`, defaulting to the empty string. |
-| DOC-12 | On client connect, the backend **MUST** send a `doc` message containing the current state. |
-| DOC-13 | On `edit` message, the backend **MUST** overwrite `state.text` with the message payload and broadcast a `doc` message to all OTHER active connections. |
-| DOC-14 | The backend **MUST NOT** persist state. A restart **MUST** reset the document to empty. *(Deliberate V1 limitation; superseded in V2.)* |
-| DOC-15 | The backend **MUST** tolerate client disconnects without crashing or affecting other clients. |
-| DOC-16 | The backend **MUST** ignore malformed messages (non-JSON, missing `type`, wrong `type`) without disconnecting the offending client; logging is sufficient. |
+| DOC-11 | The backend **MUST** hold a single in-memory `Y.Doc` exposing a `Y.Text` named `doc`. *(Replaces V1 OPS-11 in-memory string.)* |
+| DOC-12 | On client connect, the backend **MUST** delegate the WebSocket to y-websocket's `setupWSConnection(ws, request, { docName, gc })`, which drives the sync protocol (sync_step1/2/3 + awareness). *(Replaces V1 OPS-12 server-driven `doc` message.)* |
+| DOC-13 | *(Removed.)* Server-driven full-document broadcast is replaced by the y-websocket protocol's update messages. |
+| DOC-14 | The backend **MUST** persist every Y.Doc update to LevelDB at `PERSIST_DIR` (default `./data/yjs`) via `y-leveldb`. State **MUST** survive process restart and **MUST** be loaded into the Y.Doc on the first connection after restart. *(Inverted from V1 OPS-14.)* |
+| DOC-15 | The backend **MUST** tolerate client disconnects without crashing or affecting other clients. *(Unchanged from V1.)* |
+| DOC-16 | The backend **MUST** tolerate malformed y-websocket frames (handled by the y-websocket library). The library logs and ignores; the connection is **NOT REQUIRED** to be terminated. |
 
 ### 3.3 Frontend
 
 | ID | Requirement |
 |----|-------------|
 | DOC-20 | The frontend **MUST** render a single `<textarea>` filling the viewport. |
-| DOC-21 | On every `input` event, the frontend **MUST** send `{type:"edit", text:<full textarea value>}` over the WebSocket. |
-| DOC-22 | On `doc` message from the server, the frontend **MUST** replace the textarea value with the server text. Cursor-position preservation is **NOT REQUIRED** in V1 and the cursor jump is documented as failure F3. |
-| DOC-23 | On WebSocket disconnect, the frontend **MUST** attempt reconnection with a fixed 1-second retry interval. No state-sync logic is implemented in V1 — the server's `doc` message on reconnect is the only reconciliation, and any locally-typed text since disconnect is lost (failure F2). |
+| DOC-21 | On every `input` event, the frontend **MUST** translate the textarea's new value into one or more Y.Text operations using a prefix-suffix diff against the prior `Y.Text` content. The diff **MUST** be applied inside a single `ydoc.transact` so the resulting update message is one frame, not N. *(Replaces V1 OPS-21 full-text broadcast.)* |
+| DOC-22 | On Y.Text observation of remote ops, the frontend **MUST** apply the new text to the textarea while preserving the user's cursor position via `Y.RelativePosition`. F3 (cursor jump under remote ops) **MUST NOT** manifest. *(Inverted from V1 OPS-22.)* |
+| DOC-23 | The frontend **MUST** use y-websocket's `WebsocketProvider` for connection lifecycle. On reconnect the provider **MUST** run sync_step1 against the server, apply any missed ops, and ship any locally-buffered ops produced while disconnected. F2 (offline edits lost on reconnect) **MUST NOT** manifest. *(Inverted from V1 OPS-23.)* |
 
 ### 3.4 Wire Protocol
 
-JSON over WebSocket text frames; UTF-8.
-
 | ID | Requirement |
 |----|-------------|
-| DOC-30 | Server → client: `{ "type": "doc", "text": <string> }`. |
-| DOC-31 | Client → server: `{ "type": "edit", "text": <string> }`. |
-| DOC-32 | Messages **MUST NOT** carry a version, sequence number, client ID, or timestamp in V1. *(Deliberate omissions; V2 adds operation framing.)* |
-| DOC-33 | Maximum frame size **SHOULD** be 1 MiB; oversize frames **MAY** be rejected. |
+| DOC-30 | Frames **MUST** conform to the y-websocket binary protocol (sync messages + awareness messages, type-tagged with a leading byte; payloads are y-protocols-encoded). The JSON `doc`/`edit` protocol from V1 is **REMOVED**. |
+| DOC-31 | The server's first message after `setupWSConnection` **MUST** be a sync_step1 carrying the server-side state vector; the client's response is sync_step2 carrying the delta. Subsequent ops are exchanged as update messages. |
+| DOC-32 | Awareness frames **MAY** be present on the wire (provider-internal); V2 makes no use of awareness state but **MUST NOT** reject awareness frames. |
+| DOC-33 | Maximum frame size **SHOULD** remain at the default y-websocket library limit; oversize frames **MAY** be rejected. |
 
 ### 3.5 Operational
 
@@ -103,90 +103,112 @@ JSON over WebSocket text frames; UTF-8.
 | DOC-40 | Default port **MUST** be `:3001`; configurable via `PORT` environment variable. |
 | DOC-41 | `npm run dev` **MUST** run the backend (`tsx --watch`) and the Vite dev server with hot reload simultaneously. |
 | DOC-42 | `npm run build` **MUST** produce a production frontend bundle and a compiled backend; `npm start` **MUST** run the production backend, which serves the frontend bundle as static files. |
-| DOC-43 | The system **SHOULD** log on connect, disconnect, and malformed-message events; debug-level logging of every edit is **OPTIONAL**. |
+| DOC-43 | The system **SHOULD** log on connect, disconnect, and persistence-store boot events; debug-level logging of every update **MAY** be enabled. |
+| DOC-44 | The persistence directory **MUST** be configurable via `PERSIST_DIR` (default `./data/yjs`) and **MUST** be created if missing. |
+
+### 3.6 CRDT State (V2)
+
+| ID | Requirement |
+|----|-------------|
+| DOC-50 | The server's authoritative document **MUST** be a Yjs `Y.Doc` with `getText('doc')` as the single shared text type. |
+| DOC-51 | Every connected client **MUST** hold its own `Y.Doc` instance, synchronized to the server's via the y-websocket sync protocol. |
+| DOC-52 | Local edits and remote ops **MUST** be applied via `Y.Text.insert(offset, text)` / `Y.Text.delete(offset, count)`. The server **MUST NOT** maintain a parallel string state; `Y.Text.toString()` is the only canonical text. |
+
+### 3.7 Persistence (V2)
+
+| ID | Requirement |
+|----|-------------|
+| DOC-60 | The backend **MUST** open a LevelDB instance at `PERSIST_DIR` and bind it to the Y.Doc via `y-leveldb`'s `LeveldbPersistence`. |
+| DOC-61 | On Y.Doc creation (first request), the backend **MUST** call `bindState(docName, ydoc)` which loads any persisted state into the in-memory Y.Doc. |
+| DOC-62 | Every Y.Doc update **MUST** be written to LevelDB. The backend **MAY** rely on `y-leveldb`'s automatic `update`-event subscription rather than explicit per-update writes. |
+| DOC-63 | The backend **SHOULD** flush pending writes on `SIGINT`/`SIGTERM` before exiting; partial-write recovery is **NOT REQUIRED** (any successfully `flush`-ed update survives; in-flight ops on a hard kill may be lost — this is acceptable for V2 and tightened in V2.1+). |
+
+### 3.8 Reconnect (V2)
+
+| ID | Requirement |
+|----|-------------|
+| DOC-70 | On WebSocket disconnect, the client provider **MUST** retry with backoff (provider default — V2 does not configure custom backoff). |
+| DOC-71 | While disconnected, the client **MUST** continue to accept local edits; the provider buffers updates and ships them on reconnect. |
+| DOC-72 | On reconnect, sync_step1 **MUST** be issued by both ends so each side learns what the other is missing. The CRDT then merges concurrent edits without LWW. |
 
 ---
 
 ## 4. Inputs / Outputs
 
-### WebSocket frames
+### Wire-protocol layer
 
-```
-// Server → client (sent on connect; sent after every other client's edit)
-{ "type": "doc",  "text": "Hello, world." }
-
-// Client → server (sent on every input event)
-{ "type": "edit", "text": "Hello, world!" }
-```
+The y-websocket binary protocol is documented at
+`https://github.com/yjs/y-protocols`. V2 does not customize it.
 
 ### HTTP
 
 ```
 GET /              → 200, the built frontend (HTML + JS + CSS)
 GET /assets/*      → 200, hashed bundle assets (Vite output)
-GET /ws            → 101 Switching Protocols  (WebSocket upgrade)
+GET /ws            → 101 Switching Protocols  (WebSocket upgrade; y-websocket protocol)
+```
+
+### Filesystem
+
+```
+$PERSIST_DIR/    LevelDB instance owned by y-leveldb. One instance covers all
+                 document names; in V2 there's only `doc`. Format is a Yjs-
+                 internal log of binary updates plus a final flushed-state
+                 snapshot.
 ```
 
 ### CLI / env
 
 ```
-PORT  (env, default 3001)  — HTTP/WebSocket port
+PORT          (env, default 3001)            HTTP/WebSocket port
+PERSIST_DIR   (env, default ./data/yjs)      LevelDB directory
 ```
 
 ---
 
 ## 5. Out of Scope
 
-Deferred to V2 unless otherwise noted:
+Deferred to V2.1+ unless otherwise noted:
 
-- CRDTs / operational transforms / any conflict-free merge
-- Operation-based diff sync (V1 sends the full document on every keystroke)
-- Persistence (database, filesystem, or otherwise)
-- Reconnect-with-state-sync (V1 reconnect just re-fetches server state and clobbers local)
-- Multiple documents / rooms / document IDs
-- Authentication, sessions, user identity
-- Presence cursors / user names / colored selections *(V2 stretch per study plan)*
-- Undo / redo that respects remote edits *(V2 stretch)*
-- Offline-first behavior with IndexedDB *(V2 stretch)*
+- Multiple documents / rooms / document IDs (V2.1)
+- Authentication, sessions, user identity (V3?)
+- Presence cursors / user names / colored selections (V2.1 stretch — awareness channel is already on the wire)
+- Undo / redo that respects remote edits (V2.1 stretch — Yjs `UndoManager` integrates cleanly)
+- Offline-first behavior with IndexedDB persistence on the client (V2.1 stretch)
+- Compaction / GC of LevelDB (Yjs-internal `gc: true` is the default; manual snapshotting is V2.1+)
 - Rate-limiting / flood protection
-- Deployment / hosting (Fly.io / Railway is the V2 portfolio milestone)
+- Deployment / hosting (Fly.io / Railway is the V2.1 portfolio milestone)
+- CodeMirror / ProseMirror editor upgrade — V3 if it earns its keep
 
 ---
 
-## 6. Deliberate V1 Failure Modes
+## 6. V1 Failure Modes Resolved in V2
 
-V1 is designed to fail in these specific ways. Each is the target of a V2 fix.
-
-| # | Failure | How to trigger | Why it happens | V2 fix |
-|---|---------|----------------|----------------|--------|
-| F1 | Concurrent edits lose characters | Two tabs typing simultaneously | LWW: each `edit` message overwrites the entire document; the second writer's payload clobbers the first writer's keystrokes that the first writer hadn't yet shipped | CRDT: operations commute; concurrent inserts both land |
-| F2 | Network blip → divergence on reconnect | Drop network, type locally for a few seconds, reconnect | On reconnect the server sends `doc` with its last-known text; the frontend overwrites the textarea, discarding anything typed offline. Mirror case: the client missed `doc` broadcasts during the blip → its first edit after reconnect races with stale state | CRDT + persistent doc storage + state-sync on reconnect (apply local ops since last-known server state) |
-| F3 | Echo cursor jump | Open tabs A and B; type fast in A | A's keystrokes are broadcast to B; each broadcast replaces B's textarea value, which forces the cursor to position 0 mid-keystroke. Symmetric in the other direction | Operation-based sync: receivers apply *insert at offset* operations and preserve their local cursor |
-| F4 | Server restart wipes the doc | `Ctrl-C` the Node process | In-memory only; all clients see an empty textarea on reconnect, and their next keystroke ships their local text — which then becomes the new state for everyone | Persistence (sqlite, level, or persistent CRDT doc) |
-| F5 | Bandwidth scales `O(doc_size × clients × edit_rate)` | Open 5 tabs on a 50 KB document and start typing | Each keystroke sends the full document (~50 KB), broadcast to (clients-1). At 5 chars/sec across 5 tabs: 5 × 50 KB × 5 × 4 = 5 MB/s server uplink | Operation-based diff: send only the changed bytes per edit |
-
-The chaos test for V1 will assert F1 (the cleanest to demonstrate
-deterministically with Playwright). F2–F5 are documented but not all
-chaos-tested in V1; V2 may add F2–F5 chaos tests as the corresponding
-mechanisms land.
+| # | V1 outcome | V2 fix mechanism | V2 chaos test |
+|---|-----------|------------------|---------------|
+| F1 | Concurrent edits diverge — each tab sees the other's text | Yjs operations commute; both inserts land in the merged `Y.Text` and both clients converge | `F1_ConcurrentEditsConverge` — concurrent inserts on two `Y.Doc` instances; assert `finalA === finalB` AND both `'AAAAA'` and `'BBBBB'` are present |
+| F2 | Network blip → divergence on reconnect; offline edits lost | `WebsocketProvider` reconnect runs sync_step1 + ships buffered offline ops; CRDT merges | `F2_OfflineEditReconciles` — drop the WS, edit `Y.Text` locally, reconnect, assert merged result on both sides |
+| F3 | Echo cursor jump on remote edits | Y.Text observe + `Y.RelativePosition` preserves cursor across remote ops | `F3_CursorPreservedDuringRemoteEdit` — Playwright: A focuses textarea at offset N; B inserts text *before* offset N via Y.Text; assert A's cursor is still over the same logical character |
+| F4 | Server restart wipes the doc | `y-leveldb` writes every Y.Doc update; on restart the doc loads from disk | `F4_PersistsAcrossRestart` — write text via client, kill the server process, respawn against the same `PERSIST_DIR`, reconnect, assert text intact |
+| F5 | Bandwidth scales `O(doc_size × clients × edit_rate)` | y-websocket update messages carry only the delta (~10–30 bytes per typical keystroke) | Out of test scope — F5 is structurally fixed by protocol change and not separately asserted in V2 |
 
 ---
 
 ## 7. Resolved Decisions
 
+V1 entries Q1–Q11 still apply where the V1 mechanism survives in V2 (e.g.
+single-doc, vanilla TS, single npm package). V2 adds Q12–Q19.
+
 | # | Question | Decision |
 |---|----------|----------|
-| Q1 | Frontend framework? | **Vanilla TypeScript + `<textarea>`.** V1's lesson is the protocol and conflict-resolution model, not framework choice. React (or otherwise) is V2+ if it earns its keep. |
-| Q2 | WebSocket library on the server? | **`ws` (raw).** No `socket.io` magic; the V2 swap to a CRDT-aware provider (Yjs `WebsocketProvider`) is cleaner without an intermediary. |
-| Q3 | Document representation? | **Plain `string`** in the server's in-memory state. V2 replaces with a CRDT instance. |
-| Q4 | Multi-document? | **Single hardcoded doc** in V1. Rooms / document IDs are V2+. |
-| Q5 | Authentication? | **None.** Out of scope; the WebSocket is open to any connector. |
-| Q6 | Persistence? | **In-memory only.** F4 documents the failure; V2 adds storage. |
-| Q7 | Test framework? | **Vitest** for unit tests; **Playwright** for two-tab concurrent-edit chaos tests. |
-| Q8 | Repo layout? | **Single npm package** with `src/{server,client,shared}/`. Workspaces add ceremony not justified for V1. |
-| Q9 | Deployment? | **Local dev only in V1.** Fly.io / Railway is the V2 portfolio milestone. |
-| Q10 | Reconnect cadence? | **Fixed 1 s retry.** Dumb on purpose — exponential backoff is V2 hardening. |
-| Q11 | Chaos test for F1 — Playwright or manual? | **Playwright e2e:** two pages connect, type concurrently, assert character loss. Same "test asserts the V1 bug; V2 inverts it" pattern as prior builds. |
+| Q12 | Yjs or Automerge? | **Yjs.** Built specifically for collaborative text editing, mature WebSocket provider, smaller WASM, smaller learning curve for the V1 → V2 swap. Automerge is the answer if/when JSON-document sync (not just text) becomes a requirement. |
+| Q13 | Persistence backend? | **`y-leveldb`.** Official Yjs adapter; file-based, no external service, no schema. Postgres / S3-backed snapshotting is a V3 production-hardening question. |
+| Q14 | Editor — keep `<textarea>` or upgrade to CodeMirror/ProseMirror? | **Keep `<textarea>`** with a hand-written ~60-line binding. V2 pedagogy is the CRDT mechanics; richer editors would obscure them. CodeMirror is V3 if it earns its keep. |
+| Q15 | Wire protocol — y-websocket binary or roll our own JSON op protocol? | **y-websocket binary.** Canonical, free reconnect-with-sync, free awareness channel for V2.1 presence. |
+| Q16 | Multi-document / rooms? | **No, single hardcoded `doc`** in V2 — `docName="doc"` in `setupWSConnection`. URL-based multi-doc routing is V2.1. |
+| Q17 | Authentication? | **None.** Same as V1; out of scope. |
+| Q18 | Persistence directory layout? | **`./data/yjs`** under repo root by default; configurable via `PERSIST_DIR`. Single LevelDB instance covering all docs. Compaction is Yjs-internal (`gc: true`). |
+| Q19 | Server-side y-websocket utility — vendored copy or library import? | **Library import** of `y-websocket/bin/utils.js` (the canonical CommonJS helper). If ESM interop becomes painful we vendor it as `src/server/y-websocket-utils.ts` (~150 lines, mostly deserialization plumbing). |
 
 ---
 
@@ -194,7 +216,7 @@ mechanisms land.
 
 | # | Question | Owner | Due |
 |---|----------|-------|-----|
-| *(none outstanding for V1)* | | | |
+| *(none outstanding for V2)* | | | |
 
 ---
 
@@ -202,4 +224,5 @@ mechanisms land.
 
 | Version | Date       | Author        | Notes |
 |---------|------------|---------------|-------|
-| 0.1     | 2026-05-01 | Steve Weiland | Initial V1 draft — WebSocket, last-write-wins on full document, in-memory state, single document. F1-F5 documented as deliberate V1 failure modes; V2 introduces CRDTs + operation-based sync + persistence. |
+| 0.1     | 2026-05-01 | Steve Weiland | Initial V1 draft — WebSocket, last-write-wins on full document, in-memory state, single document. F1–F5 documented as deliberate V1 failure modes. |
+| 0.2     | 2026-05-02 | Steve Weiland | V2: Yjs CRDT (Y.Doc + Y.Text), y-websocket binary protocol, y-leveldb persistence, WebsocketProvider reconnect-with-state-sync. F1 inverted (converge), F2 inverted (offline reconcile), F3 inverted (cursor preserved), F4 inverted (persist across restart). New §3.6 / §3.7 / §3.8; OPS-11/12/13/14/21/22/23 rewritten or removed. Resolved Q12–Q19. |

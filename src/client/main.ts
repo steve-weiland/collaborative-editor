@@ -1,23 +1,23 @@
-import type { ClientMessage, ServerMessage } from '../shared/messages';
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { bindTextareaToYText } from './textarea-binding';
 
 /**
- * V1 frontend.
+ * V2 frontend.
  *
- * Single textarea. On every input event we ship the textarea's full value
- * to the server. On every doc message from the server we replace the
- * textarea's value with the server's text.
+ * Y.Doc + WebsocketProvider replace V1's manual JSON wire protocol. The
+ * textarea is bound to `ydoc.getText('doc')` via {@link bindTextareaToYText}
+ * which ships ops on local edits and preserves the cursor on remote ones.
  *
- * No cursor preservation, no buffering, no version vector. The naïveté is
- * the point — see spec.md §6 F1–F5.
+ * Reconnect is handled by WebsocketProvider — on drop it retries with
+ * backoff, runs sync_step1 against the server, and applies any missed ops.
+ * Local edits made while offline are buffered by the provider and shipped
+ * when the connection comes back (closes V1 F2).
  */
 
 const editor = document.getElementById('editor') as HTMLTextAreaElement;
 const statusDot = document.getElementById('status-dot') as HTMLElement;
 const statusText = document.getElementById('status-text') as HTMLElement;
-
-const RECONNECT_DELAY_MS = 1000;
-
-let socket: WebSocket | null = null;
 
 function setStatus(state: 'connecting' | 'connected' | 'disconnected'): void {
   statusDot.classList.remove('connected', 'disconnected');
@@ -29,52 +29,17 @@ function setStatus(state: 'connecting' | 'connected' | 'disconnected'): void {
     'disconnected — retrying…';
 }
 
-function wsUrl(): string {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${proto}//${location.host}/ws`;
-}
+const ydoc = new Y.Doc();
+const ytext = ydoc.getText('doc');
 
-function connect(): void {
-  setStatus('connecting');
-  const ws = new WebSocket(wsUrl());
-  socket = ws;
+// WebsocketProvider appends '/<roomname>' to the URL, so 'ws://host/ws' +
+// roomname 'doc' resolves to 'ws://host/ws/doc'. The server matches any
+// /ws* path and pins docName='doc' (single-doc per spec Q16).
+const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const provider = new WebsocketProvider(`${wsProto}//${location.host}/ws`, 'doc', ydoc);
 
-  ws.addEventListener('open', () => {
-    setStatus('connected');
-  });
-
-  ws.addEventListener('message', (event) => {
-    let msg: ServerMessage;
-    try {
-      msg = JSON.parse(event.data) as ServerMessage;
-    } catch {
-      console.warn('[malformed server frame]', event.data);
-      return;
-    }
-    if (msg.type === 'doc') {
-      // DOC-22: replace textarea value with server text. Cursor jump is
-      // documented as F3 — V1 does NOT preserve cursor position.
-      editor.value = msg.text;
-    }
-  });
-
-  ws.addEventListener('close', () => {
-    setStatus('disconnected');
-    socket = null;
-    // DOC-23: fixed 1 s retry, no state-sync logic.
-    setTimeout(connect, RECONNECT_DELAY_MS);
-  });
-
-  ws.addEventListener('error', () => {
-    // 'close' will fire after this; let the close handler drive reconnect.
-  });
-}
-
-editor.addEventListener('input', () => {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  // DOC-21: send the full textarea value on every input event.
-  const msg: ClientMessage = { type: 'edit', text: editor.value };
-  socket.send(JSON.stringify(msg));
+provider.on('status', (event: { status: 'connected' | 'connecting' | 'disconnected' }) => {
+  setStatus(event.status);
 });
 
-connect();
+bindTextareaToYText(editor, ytext);
