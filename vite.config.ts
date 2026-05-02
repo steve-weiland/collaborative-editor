@@ -11,9 +11,9 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      // Forward WebSocket upgrades during dev to the backend on :3000.
+      // Forward WebSocket upgrades during dev to the backend on :3001.
       '/ws': {
-        target: 'ws://localhost:3000',
+        target: 'ws://localhost:3001',
         ws: true,
       },
     },

@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = 3100; // 3000 is sometimes occupied by Docker on dev machines.
+const PORT = 3100; // 3001 is the dev default; 3100 keeps e2e isolated from `npm run dev`.
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({

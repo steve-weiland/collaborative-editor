@@ -7,7 +7,7 @@ import { isClientMessage, type DocMessage } from '../shared/messages.js';
 import { DocumentState } from './state.js';
 import { broadcast } from './broadcast.js';
 
-const PORT = Number(process.env.PORT ?? 3000);
+const PORT = Number(process.env.PORT ?? 3001);
 
 const state = new DocumentState();
 

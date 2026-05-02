@@ -36,7 +36,7 @@ That's the design. V1's job is to expose the failure shapes; V2 fixes them.
 
 ```bash
 npm install
-npm run dev          # backend on :3000 (tsx --watch), Vite dev on :5173
+npm run dev          # backend on :3001 (tsx --watch), Vite dev on :5173
                      # → open two tabs at http://localhost:5173/
 ```
 
@@ -44,7 +44,7 @@ Production build:
 
 ```bash
 npm run build
-npm start            # serves frontend + WebSocket on :3000
+npm start            # serves frontend + WebSocket on :3001
 ```
 
 ## Tests
@@ -56,8 +56,8 @@ npm run test:e2e     # 3 Playwright tests on port 3100 (~3s incl. server boot)
 npm run typecheck    # tsc --noEmit on both client and server
 ```
 
-The Playwright config uses port `3100` because `:3000` is sometimes claimed
-by Docker on dev machines.
+The Playwright config uses port `3100` to keep e2e isolated from `npm run dev`'s
+:3001 default.
 
 ## V1 failure modes (and how V2 fixes them)
 

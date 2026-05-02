@@ -100,7 +100,7 @@ JSON over WebSocket text frames; UTF-8.
 
 | ID | Requirement |
 |----|-------------|
-| DOC-40 | Default port **MUST** be `:3000`; configurable via `PORT` environment variable. |
+| DOC-40 | Default port **MUST** be `:3001`; configurable via `PORT` environment variable. |
 | DOC-41 | `npm run dev` **MUST** run the backend (`tsx --watch`) and the Vite dev server with hot reload simultaneously. |
 | DOC-42 | `npm run build` **MUST** produce a production frontend bundle and a compiled backend; `npm start` **MUST** run the production backend, which serves the frontend bundle as static files. |
 | DOC-43 | The system **SHOULD** log on connect, disconnect, and malformed-message events; debug-level logging of every edit is **OPTIONAL**. |
@@ -130,7 +130,7 @@ GET /ws            → 101 Switching Protocols  (WebSocket upgrade)
 ### CLI / env
 
 ```
-PORT  (env, default 3000)  — HTTP/WebSocket port
+PORT  (env, default 3001)  — HTTP/WebSocket port
 ```
 
 ---
