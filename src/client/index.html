@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Collaborative Editor — V1</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body { display: flex; flex-direction: column; font: 14px/1.4 system-ui, sans-serif; }
+      header {
+        padding: 6px 12px;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      header strong { font-weight: 600; }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        background: color-mix(in srgb, currentColor 8%, transparent);
+      }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: gray; }
+      .dot.connected { background: #2c8; }
+      .dot.disconnected { background: #c44; }
+      textarea {
+        flex: 1;
+        width: 100%;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        padding: 12px;
+        border: none;
+        outline: none;
+        resize: none;
+        background: transparent;
+        color: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Collaborative Editor — V1</strong>
+      <span class="status">
+        <span id="status-dot" class="dot"></span>
+        <span id="status-text">connecting…</span>
+      </span>
+    </header>
+    <textarea id="editor" placeholder="Start typing. Open a second tab to see V1's last-write-wins behaviour."></textarea>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
