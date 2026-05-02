@@ -1,4 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
+import { WebSocket } from 'ws';
+import type { ServerMessage } from '../../src/shared/messages';
 
 async function waitConnected(page: Page): Promise<void> {
   await page.waitForFunction(
@@ -42,49 +44,92 @@ test.describe('V1 baseline', () => {
 /**
  * F1 — concurrent edits diverge under last-write-wins.
  *
- * V1 baseline: this test PASSES by asserting the bug. After two tabs fill
- * concurrently, each tab ends up with the OTHER tab's text, because each
- * tab's input event fired with its own pre-broadcast value and the server
- * processed them in some order, sending the loser's text back to the
- * winner via broadcast. They diverge until someone makes a fresh edit.
+ * V1 baseline: this test PASSES by asserting the bug. Two concurrent edits
+ * over the wire result in each client seeing only the OTHER client's text
+ * — the server doesn't echo back to a sender, and broadcasts capture the
+ * server's state at the moment of processing. With LWW, that state is
+ * "the most recently received text from anyone", so:
  *
- * V2 (CRDT) will INVERT: both tabs converge to a merged text containing
- * the characters from both tabs.
+ *   - A sends AAAAA   → server state=AAAAA → broadcast 'AAAAA' to {B}
+ *   - B sends BBBBB   → server state=BBBBB → broadcast 'BBBBB' to {A}
+ *
+ * A only ever hears 'BBBBB'; B only ever hears 'AAAAA'. They diverge,
+ * with neither client's local state containing both inputs.
+ *
+ * V2 (CRDT) will INVERT: the broadcasts both contain a merged document with
+ * characters from both clients, and both clients converge to the same text.
+ *
+ * This test uses raw `ws` clients rather than Playwright `page.fill()`. The
+ * earlier browser-driven version was flaky: Playwright's `fill()` runs in
+ * two phases (selectAll, then insertText) and an incoming broadcast between
+ * those phases programmatically set `textarea.value`, moved the cursor, and
+ * caused insertText to append rather than replace — producing a fluke
+ * "AAAAABBBBB" merge that's a Playwright+DOM artifact, not LWW behaviour.
+ * F1 is a server-protocol claim, so the test exercises the protocol
+ * directly.
  */
 test.describe('F1 — concurrent edits (V1 LWW)', () => {
-  test('two tabs typing simultaneously diverge', async ({ browser }) => {
-    const ctxA = await browser.newContext();
-    const ctxB = await browser.newContext();
+  const PORT = 3100; // matches playwright.config.ts
+
+  /** Helper: open a WS client and wait for the initial 'doc' message. */
+  async function open(): Promise<{ ws: WebSocket; messages: string[] }> {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
+    await new Promise<void>((res, rej) => {
+      ws.once('open', () => res());
+      ws.once('error', rej);
+    });
+    const messages: string[] = [];
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString()) as ServerMessage;
+      if (msg.type === 'doc') messages.push(msg.text);
+    });
+    // Wait for the initial doc message so subsequent broadcasts are
+    // distinguishable from the connect snapshot.
+    await new Promise<void>((res) => {
+      const check = () => (messages.length > 0 ? res() : setTimeout(check, 5));
+      check();
+    });
+    return { ws, messages };
+  }
+
+  test('two clients editing concurrently end up with each other\'s text', async () => {
+    const { ws: a, messages: aMessages } = await open();
+    const { ws: b, messages: bMessages } = await open();
     try {
-      const a = await ctxA.newPage();
-      const b = await ctxB.newPage();
-      await a.goto('/');
-      await b.goto('/');
-      await waitConnected(a);
-      await waitConnected(b);
+      // Reset capture: discard the initial empty-doc snapshot from connect.
+      aMessages.length = 0;
+      bMessages.length = 0;
 
-      // Concurrent fills. Both pages dispatch an `input` event with their
-      // local textarea value before either has seen the other's broadcast.
-      await Promise.all([
-        a.locator('#editor').fill('AAAAA'),
-        b.locator('#editor').fill('BBBBB'),
-      ]);
+      // Concurrent edits. Each client sends its own text. The server
+      // processes them sequentially, broadcasting each to the OTHER
+      // client. We don't care which order the server picks.
+      a.send(JSON.stringify({ type: 'edit', text: 'AAAAA' }));
+      b.send(JSON.stringify({ type: 'edit', text: 'BBBBB' }));
 
-      // Let any in-flight broadcasts settle.
-      await a.waitForTimeout(500);
+      // Wait until both clients have heard one broadcast each.
+      await new Promise<void>((res) => {
+        const check = () =>
+          aMessages.length >= 1 && bMessages.length >= 1
+            ? res()
+            : setTimeout(check, 10);
+        check();
+      });
 
-      const finalA = await a.locator('#editor').inputValue();
-      const finalB = await b.locator('#editor').inputValue();
+      // Brief settle window in case anything else lands.
+      await new Promise((r) => setTimeout(r, 100));
 
-      // V1 LWW: both ended up with the OTHER tab's text → they diverge.
-      // (Deterministic for this two-message sequence: each page sees the
-      //  remote broadcast after its own local fill, and the broadcast
-      //  payload is the other tab's text.)
-      expect(finalA).not.toEqual(finalB);
-      expect([finalA, finalB].sort()).toEqual(['AAAAA', 'BBBBB']);
+      const finalA = aMessages.at(-1);
+      const finalB = bMessages.at(-1);
+
+      // V1 LWW (the "bug"): A only ever hears B's text, B only ever hears
+      // A's. The two clients have diverged — neither has a document that
+      // contains both inputs.
+      expect(finalA).toBe('BBBBB');
+      expect(finalB).toBe('AAAAA');
+      expect(finalA).not.toBe(finalB);
     } finally {
-      await ctxA.close();
-      await ctxB.close();
+      a.close();
+      b.close();
     }
   });
 });
