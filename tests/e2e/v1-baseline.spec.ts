@@ -74,21 +74,34 @@ test.describe('F1 — concurrent edits (V1 LWW)', () => {
   /** Helper: open a WS client and wait for the initial 'doc' message. */
   async function open(): Promise<{ ws: WebSocket; messages: string[] }> {
     const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
-    await new Promise<void>((res, rej) => {
-      ws.once('open', () => res());
-      ws.once('error', rej);
-    });
+
+    // CRITICAL: register the 'message' listener BEFORE awaiting 'open'.
+    // When the upgrade response and the server's initial doc frame arrive
+    // in the same TCP read, ws emits 'open' and 'message' synchronously
+    // in the same tick. Awaiting 'open' first queues the resolution as a
+    // microtask; by the time the microtask runs and the test registers a
+    // 'message' listener, the synchronous emit has already happened with
+    // no listener and the frame is gone. Registering up front fixes it.
     const messages: string[] = [];
     ws.on('message', (data) => {
       const msg = JSON.parse(data.toString()) as ServerMessage;
       if (msg.type === 'doc') messages.push(msg.text);
     });
-    // Wait for the initial doc message so subsequent broadcasts are
-    // distinguishable from the connect snapshot.
-    await new Promise<void>((res) => {
-      const check = () => (messages.length > 0 ? res() : setTimeout(check, 5));
-      check();
+
+    await new Promise<void>((res, rej) => {
+      ws.once('open', () => res());
+      ws.once('error', rej);
     });
+
+    // Initial doc message may already be in `messages` if it arrived in
+    // the same TCP read as the upgrade response; otherwise it lands shortly.
+    const startedAt = Date.now();
+    while (messages.length === 0) {
+      if (Date.now() - startedAt > 5_000) {
+        throw new Error('timed out waiting for initial doc message');
+      }
+      await new Promise((r) => setTimeout(r, 5));
+    }
     return { ws, messages };
   }
 
@@ -107,13 +120,15 @@ test.describe('F1 — concurrent edits (V1 LWW)', () => {
       b.send(JSON.stringify({ type: 'edit', text: 'BBBBB' }));
 
       // Wait until both clients have heard one broadcast each.
-      await new Promise<void>((res) => {
-        const check = () =>
-          aMessages.length >= 1 && bMessages.length >= 1
-            ? res()
-            : setTimeout(check, 10);
-        check();
-      });
+      const startedAt = Date.now();
+      while (aMessages.length < 1 || bMessages.length < 1) {
+        if (Date.now() - startedAt > 5_000) {
+          throw new Error(
+            `timed out waiting for broadcasts: aMessages=${aMessages.length} bMessages=${bMessages.length}`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
 
       // Brief settle window in case anything else lands.
       await new Promise((r) => setTimeout(r, 100));
