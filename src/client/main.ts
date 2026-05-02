@@ -2,8 +2,9 @@ import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { bindTextareaToYText } from './textarea-binding';
-import { setupPresence } from './presence';
+import { setupPresence, setupName } from './presence';
 import { setupUndo } from './undo';
+import { CursorOverlay } from './cursor-overlay';
 
 /**
  * v2.1.0 frontend.
@@ -21,10 +22,12 @@ import { setupUndo } from './undo';
  */
 
 const editor = document.getElementById('editor') as HTMLTextAreaElement;
+const editorWrap = document.getElementById('editor-wrap') as HTMLElement;
 const statusDot = document.getElementById('status-dot') as HTMLElement;
 const statusText = document.getElementById('status-text') as HTMLElement;
 const roomLabel = document.getElementById('room-label') as HTMLElement;
 const roomInput = document.getElementById('room-input') as HTMLInputElement;
+const nameInput = document.getElementById('name-input') as HTMLInputElement;
 const presenceFooter = document.getElementById('presence') as HTMLElement;
 
 const ROOM_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -66,7 +69,13 @@ provider.on('status', (event: { status: 'connected' | 'connecting' | 'disconnect
 
 bindTextareaToYText(editor, ytext);
 setupPresence(provider.awareness, editor, presenceFooter);
+setupName(provider.awareness, nameInput);
 setupUndo(ytext, editor);
+new CursorOverlay(editor, editorWrap, provider.awareness);
+
+// Test hook: e2e tests need to read the local awareness clientID from
+// the OTHER tab to assert the overlay is keyed correctly. (F12.)
+(window as unknown as { __yProvider: WebsocketProvider }).__yProvider = provider;
 
 // Room switcher: Enter in the input → location.hash → reload (DOC-25).
 roomInput.addEventListener('keydown', (e: KeyboardEvent) => {

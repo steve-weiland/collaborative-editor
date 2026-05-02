@@ -2,9 +2,9 @@
 
 | Field   | Value         |
 |---------|---------------|
-| Version | 0.3 (draft)   |
+| Version | 0.4 (draft)   |
 | Author  | Steve Weiland |
-| Date    | 2026-05-02    |
+| Date    | 2026-04-24    |
 | Status  | Draft         |
 
 ---
@@ -36,8 +36,16 @@ undo/redo that respects remote ops, and **y-indexeddb** for browser-side
 offline-first persistence (page reload shows the doc immediately, even if
 the server is unreachable). F8–F11 cover these as feature-presence tests.
 
-The portfolio milestone is a deployable live demo (Fly.io / Railway target),
-which is v2.2.0 work.
+v2.2.0 layers two UX features on top of v2.1.0's awareness channel
+without changing the wire protocol: **visual cursor overlays** —
+absolutely-positioned `<div>` markers inside the editor area, anchored
+by pixel coordinates measured against a hidden mirror `<div>` that
+mimics the textarea's box model — and **user-supplied names** —
+the auto-generated `Alice-042` style handle is now editable, persisted
+per-browser via `localStorage`, and broadcast on the awareness channel.
+F12 and F13 lock these in. Color remains auto-derived from the client ID;
+deployment to Fly.io / Railway is deferred indefinitely (skipped per
+v2.2.0 scope decision).
 
 ---
 
@@ -62,6 +70,8 @@ which is v2.2.0 work.
 | Awareness state | *(v2.1.0)* Ephemeral per-client metadata published on the y-websocket awareness channel: `{ name, color, cursor }`. Used in v2.1.0 for a text-only presence footer; visual cursor overlays are v2.2.0. |
 | `Y.UndoManager` | *(v2.1.0)* Yjs class that tracks origin-tagged operations and produces inverse ops on `undo()`. v2.1.0 scopes it to a single `localOrigin` symbol so remote ops are never undone. |
 | `y-indexeddb` | *(v2.1.0)* Yjs persistence adapter that mirrors a `Y.Doc` into the browser's IndexedDB. Loads on page open *before* the WebSocketProvider syncs, so reload shows the document immediately. |
+| Mirror div | *(v2.2.0)* A hidden `<div>` whose computed style (font, padding, border, line-height, white-space, word-wrap) is copied from the textarea. Inserting the textarea's prefix-up-to-offset into the mirror plus a zero-width marker span lets the client read the marker's `getBoundingClientRect()` to learn the pixel coordinates of any character offset. The canonical pattern for textarea cursor overlays. |
+| Cursor overlay | *(v2.2.0)* An absolutely-positioned `<div>` anchored next to the editor that visually marks a remote client's cursor. One overlay per remote `clientId`; updated whenever that client's awareness state changes; removed when the client disconnects. |
 
 ---
 
@@ -158,10 +168,11 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords:
 
 | ID | Requirement |
 |----|-------------|
-| DOC-100 | Each client **MUST** publish an awareness state on connect: `{ name: string, color: string (hex), cursor: number \| null }`. Name and color **MUST** be picked deterministically from the WebsocketProvider's per-session client ID. |
+| DOC-100 | Each client **MUST** publish an awareness state on connect: `{ name: string, color: string (hex), cursor: number \| null }`. Color **MUST** be picked deterministically from the WebsocketProvider's per-session client ID. Name **MUST** be the user-supplied value if set (DOC-104), otherwise the deterministic `Alice-042`-style handle derived from the client ID. |
 | DOC-101 | The client **MUST** update its awareness `cursor` field on every textarea `selectionchange` (debounced ~50 ms) with the textarea's `selectionStart`, or `null` if the textarea is not focused. |
 | DOC-102 | The client **MUST** render a status footer listing every OTHER client's `name`, `color`, and `cursor` offset. The footer **MUST** update whenever the awareness map changes. |
-| DOC-103 | Visual cursor overlays inside the textarea are **OUT OF SCOPE** in v2.1.0; the offset display in the footer is the v2.1 surface. Overlays are v2.2.0. |
+| DOC-104 | *(v2.2.0)* The header **MUST** include a name input field. On every change (debounced ~150 ms) the client **MUST** publish the new name on the awareness channel (overwriting `state.name`) and persist it to `localStorage` under the key `collab-editor:name`. On page load the client **MUST** preload the input from `localStorage` (if set) before the awareness state is first published, so other clients see the user-supplied name from the start of the session. |
+| DOC-105 | *(v2.2.0)* Color remains auto-assigned from the client ID. User-picked colors are out of scope — see §5. |
 
 ### 3.11 Undo/redo (v2.1.0)
 
@@ -180,6 +191,18 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords:
 | DOC-121 | The client **SHOULD** wait for the `IndexeddbPersistence` `synced` event before binding the textarea, so reload-with-content doesn't briefly flash empty. |
 | DOC-122 | A page reload **MUST** display the previously-edited document text immediately, even if the WebSocket connection is unavailable. |
 | DOC-123 | Edits made while the server is unreachable **MUST** be persisted to IndexedDB and pushed to the server on the next successful reconnect (automatic via the WebsocketProvider's update buffer + IndexeddbPersistence's update-event subscription). |
+
+### 3.13 Visual cursor overlays (v2.2.0)
+
+| ID | Requirement |
+|----|-------------|
+| DOC-130 | The frontend **MUST** wrap the textarea in a positioned container (`position: relative`) that hosts absolutely-positioned overlay elements. The textarea's box model **MUST NOT** change. |
+| DOC-131 | The frontend **MUST** maintain one hidden `<div>` (the *mirror div*) that copies the textarea's computed style for: `font-family`, `font-size`, `font-weight`, `line-height`, `letter-spacing`, `padding`, `border`, `box-sizing`, `white-space: pre-wrap`, `word-wrap: break-word`, `width`. The mirror **MUST** be kept invisible (`visibility: hidden` or `position: absolute; pointer-events: none; left: -9999px`) and width-aligned with the textarea. |
+| DOC-132 | To compute the pixel position of an offset `n`, the client **MUST** set the mirror's text content to `textarea.value.slice(0, n)` followed by a zero-width marker `<span>`, then read the span's `getBoundingClientRect()`. The mirror's bounding rect **MUST** be subtracted to yield textarea-local coordinates. |
+| DOC-133 | For each remote client whose awareness state has a non-null `cursor`, the frontend **MUST** render an overlay `<div>` keyed by the remote client ID. Each overlay **MUST** be sized as a 2px-wide vertical bar matching the line height, colored with the remote client's awareness `color`, and labeled with a small badge containing the remote client's `name`. |
+| DOC-134 | Overlay positions **MUST** be re-measured and re-rendered when (a) the local textarea's value changes (because line wrapping shifts every offset), (b) the textarea's size changes (window resize), or (c) any remote awareness state changes. Re-renders **SHOULD** be coalesced via `requestAnimationFrame`. |
+| DOC-135 | When a remote client's awareness state goes away (disconnect or `cursor: null`), the corresponding overlay **MUST** be removed from the DOM. |
+| DOC-136 | The local user's own cursor **MUST NOT** have an overlay rendered (the textarea's native caret is sufficient). |
 
 ---
 
@@ -218,16 +241,18 @@ PERSIST_DIR   (env, default ./data/yjs)      LevelDB directory
 
 ## 5. Out of Scope
 
-Deferred to v2.2.0+ unless otherwise noted:
+Deferred to a later version unless otherwise noted:
 
-- **Visual cursor overlays inside the textarea** *(v2.2.0)* — pixel-from-character-offset measurement against a hidden mirror div + absolutely-positioned overlays. v2.1.0's text-only awareness footer is the bridge.
-- **User-supplied names** *(v2.2.0)* — v2.1.0 picks an anonymous handle deterministically from the client ID.
 - Authentication, sessions, user identity (V3?)
 - Permissions / read-only rooms — every connected client is read-write.
 - Compaction / GC of LevelDB (Yjs-internal `gc: true` is the default; manual snapshotting is later)
 - Rate-limiting / flood protection
-- **Hot-swap rooms without a page reload** *(v2.2.0+)* — v2.1.0 reloads on hash change.
-- **Deployment / hosting** (Fly.io / Railway is the v2.2.0 portfolio milestone)
+- Hot-swap rooms without a page reload — v2.1.0+ reloads on hash change.
+- **User-picked colors** — color stays auto-derived from the client ID. Users get a name field, not a color picker.
+- **Selection-range overlays** — overlays in v2.2.0 mark the cursor (a single offset), not the selection range. Multi-character selection visualization is deferred.
+- **User avatars / images** — text badges only.
+- **Cursor blink animation** — overlays are a static colored bar with a name badge; no CSS animation in v2.2.0.
+- **Deployment / hosting** (Fly.io / Railway) — skipped indefinitely. The portfolio artifact is the V1 → v2.2.0 evolution and the chaos-test diff, not a live URL.
 - CodeMirror / ProseMirror editor upgrade — V3 if it earns its keep
 
 ---
@@ -252,6 +277,13 @@ inversions but confirm that the v2.1.0 features are wired correctly:
 | F10 | Local undo doesn't affect remote ops | `F10_UndoRespectsRemote` — A types `AAA`, B inserts `BBB` before, A undoes, result is `BBB` |
 | F11 | IndexedDB survives page reload | `F11_IndexedDBSurvivesReload` — edit, `page.reload()`, assert text still there |
 
+v2.2.0 adds two more feature-presence tests:
+
+| # | Feature | v2.2.0 test |
+|---|---------|-------------|
+| F12 | Visual cursor overlay rendered for remote client | `F12_OverlayRendersForRemoteCursor` — A focuses at offset N; B sees a `.cursor-overlay[data-client-id="<A>"]` element with non-zero `top`/`left` |
+| F13 | User-supplied name persists across reload | `F13_NamePersistsAcrossReload` — A types in the name input, page A reloads, assert input is repopulated AND awareness state on B shows the new name |
+
 ---
 
 ## 7. Resolved Decisions
@@ -275,6 +307,10 @@ single-doc, vanilla TS, single npm package). V2 adds Q12–Q19.
 | Q23 | Per-client name + color: user-input or auto? | **Auto** — derived deterministically from the client ID, drawn from a small fixed list of names + a hex-color palette. User-supplied names are v2.2.0 (and overlap with auth concerns even if we don't add auth). |
 | Q24 | Undo manager scope? | **Track local origin only** (`{ trackedOrigins: new Set([localOrigin]) }`) so remote ops are never undone — the F10 invariant. |
 | Q25 | Wait for IndexedDB sync before binding? | **Yes** (DOC-121, `SHOULD`). Avoids the reload "flash empty then jump to content" paint sequence. |
+| Q26 | How to anchor cursor overlays to character offsets? | **Mirror div** — a hidden `<div>` whose computed style is copied from the textarea, populated with `value.slice(0, offset)` plus a zero-width marker `<span>` whose `getBoundingClientRect()` gives the pixel position. Canonical pattern; works around the textarea's lack of selection-range geometry APIs. Alternatives rejected: (a) `<contenteditable>` swap (would discard the V2 lesson that the binding stays simple), (b) Range API on the textarea (not supported), (c) shadow CodeMirror (Q14 already says no). |
+| Q27 | When to re-measure overlays? | **On three triggers, coalesced via `requestAnimationFrame`**: (a) any local input event (line wraps shift), (b) `window.resize` (textarea width changes wraps), (c) any awareness map mutation (a remote cursor moved). rAF coalescing prevents thrash when many awareness updates land in the same tick. |
+| Q28 | Where to persist user-supplied names? | **`localStorage` keyed `collab-editor:name`**, per-browser. Not server-side: V2.2 has no auth, so server-side identity wouldn't help. Per-browser matches the deployed "open two tabs to test" workflow. |
+| Q29 | Should the overlay show the local user's own cursor? | **No** — the textarea's native caret is sufficient and overlapping the native caret with our overlay would look broken. F12 explicitly asserts the overlay is rendered on the *other* tab. |
 
 ---
 
@@ -293,3 +329,4 @@ single-doc, vanilla TS, single npm package). V2 adds Q12–Q19.
 | 0.1     | 2026-05-01 | Steve Weiland | Initial V1 draft — WebSocket, last-write-wins on full document, in-memory state, single document. F1–F5 documented as deliberate V1 failure modes. |
 | 0.2     | 2026-05-02 | Steve Weiland | V2: Yjs CRDT (Y.Doc + Y.Text), y-websocket binary protocol, y-leveldb persistence, WebsocketProvider reconnect-with-state-sync. F1 inverted (converge), F2 inverted (offline reconcile), F3 inverted (cursor preserved), F4 inverted (persist across restart). New §3.6 / §3.7 / §3.8; OPS-11/12/13/14/21/22/23 rewritten or removed. Resolved Q12–Q19. |
 | 0.3     | 2026-05-02 | Steve Weiland | v2.1.0: multi-doc routing (DOC-03/12/24/25, §3.9), awareness presence (§3.10), `Y.UndoManager` for local-only undo/redo (§3.11), `y-indexeddb` offline-first persistence (§3.12). F8-F11 added as feature-presence tests. Resolved Q20-Q25. |
+| 0.4     | 2026-04-24 | Steve Weiland | v2.2.0: visual cursor overlays (§3.13, DOC-130-136), user-supplied names with `localStorage` persistence (DOC-104/105 extending §3.10). DOC-103 (overlays-deferred marker) removed; the v2.1.0 "deferred" line in §5 is replaced with the v2.2.0 in-scope rules + new deferrals (user-picked colors, selection ranges, avatars, blink animation). F12/F13 added. Resolved Q26-Q29. **Deployment to Fly.io / Railway is now formally skipped** rather than deferred — the V1 → v2.2.0 chaos-test evolution is the portfolio artifact. |

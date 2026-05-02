@@ -440,3 +440,125 @@ test.describe('F11 — IndexedDB persists across page reload', () => {
     );
   });
 });
+
+/* ─── F12 — visual cursor overlay rendered for remote client (v2.2.0) ────── */
+
+test.describe('F12 — visual cursor overlay', () => {
+  test('B renders a .cursor-overlay element keyed by A\'s clientID', async ({ browser }) => {
+    const ctxA = await browser.newContext();
+    const ctxB = await browser.newContext();
+    try {
+      const room = `f12-${Date.now()}`;
+      const a = await ctxA.newPage();
+      const b = await ctxB.newPage();
+      await a.goto(`/#${room}`);
+      await b.goto(`/#${room}`);
+      await waitConnected(a);
+      await waitConnected(b);
+
+      // Seed text and park A's cursor at offset 5 (end of 'hello').
+      await a.locator('#editor').fill('hello world');
+      await b.waitForFunction(
+        () => (document.getElementById('editor') as HTMLTextAreaElement).value === 'hello world',
+      );
+      await a.evaluate(() => {
+        const t = document.getElementById('editor') as HTMLTextAreaElement;
+        t.focus();
+        t.setSelectionRange(5, 5);
+      });
+
+      // A's clientID is the awareness key the overlay element is tagged with.
+      const aClientId = await a.evaluate(() => {
+        const w = window as unknown as { __yProvider: { awareness: { clientID: number } } };
+        return w.__yProvider.awareness.clientID;
+      });
+
+      const overlay = b.locator(`.cursor-overlay[data-client-id="${aClientId}"]`);
+      await expect(overlay).toBeVisible({ timeout: 5_000 });
+
+      // It must be positioned somewhere — not stuck at top:0/left:0.
+      const pos = await overlay.evaluate((el: HTMLElement) => ({
+        left: parseFloat(el.style.left),
+        top: parseFloat(el.style.top),
+        height: parseFloat(el.style.height),
+      }));
+      expect(pos.left).toBeGreaterThan(0);
+      expect(pos.top).toBeGreaterThanOrEqual(0);
+      expect(pos.height).toBeGreaterThan(0);
+
+      // The label has the remote client's name.
+      const labelText = await overlay.locator('.cursor-overlay-label').innerText();
+      expect(labelText.length).toBeGreaterThan(0);
+
+      // And A does NOT render an overlay for its own cursor (DOC-136).
+      const ownOverlay = a.locator(`.cursor-overlay[data-client-id="${aClientId}"]`);
+      await expect(ownOverlay).toHaveCount(0);
+    } finally {
+      await ctxA.close();
+      await ctxB.close();
+    }
+  });
+});
+
+/* ─── F13 — user-supplied name persists across reload (v2.2.0) ───────────── */
+
+test.describe('F13 — user-supplied name', () => {
+  test('typing a name pushes it on awareness, persists, and survives reload', async ({ browser }) => {
+    const ctxA = await browser.newContext();
+    const ctxB = await browser.newContext();
+    try {
+      const room = `f13-${Date.now()}`;
+      const a = await ctxA.newPage();
+      const b = await ctxB.newPage();
+      await a.goto(`/#${room}`);
+      await b.goto(`/#${room}`);
+      await waitConnected(a);
+      await waitConnected(b);
+
+      const customName = `Custom-${Date.now() % 100000}`;
+      await a.locator('#name-input').fill(customName);
+
+      // B sees A's custom name on the awareness channel.
+      await b.waitForFunction(
+        (expected) => {
+          const aw = (window as unknown as {
+            __yProvider?: { awareness: { clientID: number; getStates(): Map<number, unknown> } };
+          }).__yProvider?.awareness;
+          if (!aw) return false;
+          for (const [clientId, state] of aw.getStates()) {
+            if (clientId === aw.clientID) continue;
+            if ((state as { name?: string }).name === expected) return true;
+          }
+          return false;
+        },
+        customName,
+        { timeout: 5_000 },
+      );
+
+      // Reload A; localStorage rehydrates the input.
+      await a.reload();
+      await waitConnected(a);
+      await expect(a.locator('#name-input')).toHaveValue(customName);
+
+      // And the new (post-reload) A still publishes the name on awareness.
+      await b.waitForFunction(
+        (expected) => {
+          const aw = (window as unknown as {
+            __yProvider?: { awareness: { clientID: number; getStates(): Map<number, unknown> } };
+          }).__yProvider?.awareness;
+          if (!aw) return false;
+          for (const [clientId, state] of aw.getStates()) {
+            if (clientId === aw.clientID) continue;
+            if ((state as { name?: string }).name === expected) return true;
+          }
+          return false;
+        },
+        customName,
+        { timeout: 5_000 },
+      );
+    } finally {
+      await ctxA.close();
+      await ctxB.close();
+    }
+  });
+});

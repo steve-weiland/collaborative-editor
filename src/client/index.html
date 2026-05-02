@@ -46,6 +46,12 @@
       .dot { width: 8px; height: 8px; border-radius: 50%; background: gray; display: inline-block; }
       .dot.connected { background: #2c8; }
       .dot.disconnected { background: #c44; }
+      #editor-wrap {
+        flex: 1;
+        position: relative;
+        display: flex;
+        overflow: hidden;
+      }
       textarea {
         flex: 1;
         width: 100%;
@@ -60,6 +66,34 @@
       #presence { list-style: none; padding: 0; margin: 0; display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
       #presence li { display: inline-flex; align-items: center; gap: 6px; }
       #presence li.empty { color: color-mix(in srgb, currentColor 50%, transparent); }
+
+      /* v2.2.0 visual cursor overlays. The wrap is a 2px vertical bar
+         positioned by JS; the bar+label inherit the cursor color via the
+         CSS custom property --cursor-color (set per overlay in JS). */
+      .cursor-overlay {
+        position: absolute;
+        width: 2px;
+        pointer-events: none;
+        z-index: 1;
+        --cursor-color: #888;
+      }
+      .cursor-overlay-bar {
+        width: 100%;
+        height: 100%;
+        background: var(--cursor-color);
+      }
+      .cursor-overlay-label {
+        position: absolute;
+        bottom: 100%;
+        left: 0;
+        white-space: nowrap;
+        font: 10px/1 system-ui, sans-serif;
+        padding: 1px 4px;
+        border-radius: 2px 2px 2px 0;
+        color: white;
+        background: var(--cursor-color);
+        transform: translateY(-1px);
+      }
     </style>
   </head>
   <body>
@@ -69,6 +103,7 @@
         <span class="room" id="room-label">room: doc</span>
       </div>
       <div style="display:flex; align-items:center; gap:12px;">
+        <input type="text" id="name-input" placeholder="your name…" aria-label="your name" maxlength="32" />
         <input type="text" id="room-input" placeholder="switch room…" aria-label="switch room" />
         <span class="status">
           <span id="status-dot" class="dot"></span>
@@ -76,7 +111,9 @@
         </span>
       </div>
     </header>
-    <textarea id="editor" placeholder="Start typing. Open a second tab — concurrent edits merge cleanly via the CRDT. Try /#another-room for a different doc."></textarea>
+    <div id="editor-wrap">
+      <textarea id="editor" placeholder="Start typing. Open a second tab — concurrent edits merge cleanly via the CRDT. Try /#another-room for a different doc."></textarea>
+    </div>
     <footer>
       <span style="font-size:12px; color:color-mix(in srgb, currentColor 50%, transparent);">others here:</span>
       <ul id="presence"></ul>

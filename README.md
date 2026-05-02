@@ -8,11 +8,30 @@ provider.
 
 | | |
 |--|--|
-| **Spec** | [`spec.md`](./spec.md) — RFC-2119 requirements; V1 → V2 → v2.1.0 evolution |
-| **Status** | `v2.1.0` released. V1 failure modes F1-F5 addressed in v2.0.0; v2.1.0 stacks **multi-doc routing**, **awareness presence**, **`Y.UndoManager`**, and **y-indexeddb offline-first** on top, locked in by feature tests F8-F11. |
+| **Spec** | [`spec.md`](./spec.md) — RFC-2119 requirements; V1 → V2 → v2.1.0 → v2.2.0 evolution |
+| **Status** | `v2.2.0` released. V1 failure modes F1-F5 addressed in v2.0.0; v2.1.0 added **multi-doc routing**, **awareness presence**, **`Y.UndoManager`**, and **y-indexeddb offline-first**; v2.2.0 layers **visual cursor overlays** + **user-supplied names** on top. F1-F4 + F8-F13 chaos tests (12 total) lock the surface in. |
 | **Stack** | Node.js 20 + TypeScript + Yjs + y-websocket + y-leveldb + y-indexeddb + Vite + vanilla TS frontend |
 
 ---
+
+## v2.2.0 in 30 seconds
+
+- **Visual cursor overlays** — for every other connected client whose
+  awareness `cursor` is non-null, an absolutely-positioned 2px vertical
+  bar + name badge is rendered inside the editor at the pixel coordinates
+  of that character offset. Coordinates come from a hidden mirror `<div>`
+  whose computed style is copied from the textarea — the canonical
+  pattern for textarea cursor geometry, since textareas don't expose
+  Range/getClientRects. Re-renders coalesce via `requestAnimationFrame`
+  on (a) local input, (b) window resize, (c) any awareness change.
+- **User-supplied names** — the header has an editable name field;
+  typing into it pushes the new name onto the awareness channel
+  (debounced 150 ms) and persists it in `localStorage` under
+  `collab-editor:name`. Reload preserves it. Empty falls back to the
+  auto `Alice-042`-style handle. Color stays auto.
+
+(All v2.1.0 mechanics — multi-doc routing, presence footer, undo, IndexedDB —
+still apply unchanged. F12 and F13 lock the new surface in.)
 
 ## v2.1.0 in 30 seconds
 
@@ -63,7 +82,7 @@ npm start            # serves frontend + WebSocket on :3001
 
 ```bash
 npm test             # 22 vitest unit tests (diff + Y.Text round-trip + URL parsing + presence identity)
-npm run test:e2e     # 10 Playwright tests on port 3100 (~3.5s incl. server boot)
+npm run test:e2e     # 12 Playwright tests on port 3100 (~5s incl. server boot)
                      #   - 2 baseline browser tests
                      #   - F1 concurrent-edit convergence
                      #   - F2 offline-edit reconciliation
@@ -73,6 +92,8 @@ npm run test:e2e     # 10 Playwright tests on port 3100 (~3.5s incl. server boot
                      #   - F9 awareness presence (v2.1.0)
                      #   - F10 undo respects remote ops (v2.1.0)
                      #   - F11 IndexedDB survives reload (v2.1.0)
+                     #   - F12 visual cursor overlay rendered for remote (v2.2.0)
+                     #   - F13 user-supplied name persists across reload (v2.2.0)
 npm run typecheck    # tsc --noEmit on both client and server
 ```
 
@@ -106,6 +127,13 @@ feature-presence tests that lock in the v2.1.0 surface:
 | F10 | Undo respects remote ops | A types `AAA`, B inserts `BBB` at offset 0, A undoes; result is `BBB` (not `''`, not `BBBAAA`) — only A's local origin is on its UndoManager's stack |
 | F11 | IndexedDB survives reload | Page types text, `page.reload()`, asserts text is still there before the WebSocket reconnects |
 
+## v2.2.0 features (F12-F13)
+
+| # | Feature | What the test asserts |
+|---|---------|----------------------|
+| F12 | Visual cursor overlay rendered for remote client | A focuses `#editor` at offset 5; B selects `.cursor-overlay[data-client-id="<A's clientID>"]`, asserts it's visible with non-zero `style.left`/`top`/`height` and a non-empty label. A does **not** render an overlay for its own cursor. |
+| F13 | User-supplied name persists across reload | A types into `#name-input`; B sees the new name on the awareness channel; A reloads; the input value is rehydrated from `localStorage` and the post-reload awareness state still carries the custom name. |
+
 ## Project layout
 
 ```
@@ -123,14 +151,15 @@ collaborative-editor/
 │   │   ├── url.ts                   parseRoomFromUrl (regex-validated /ws/<room>)
 │   │   └── y-websocket-utils.d.ts   tiny type stub for the CommonJS server helper
 │   └── client/
-│       ├── index.html               textarea + status pill + room switcher + presence footer
-│       ├── main.ts                  Y.Doc + IndexeddbPersistence + WebsocketProvider + binding/presence/undo wiring
+│       ├── index.html               textarea + status pill + name input + room switcher + presence footer + .cursor-overlay styles
+│       ├── main.ts                  Y.Doc + IndexeddbPersistence + WebsocketProvider + binding/presence/undo/overlay wiring
 │       ├── textarea-binding.ts      ~80 lines: prefix-suffix diff + relative-position cursor preservation; exports localOrigin
-│       ├── presence.ts              identity-by-client-ID + awareness publish + footer renderer
+│       ├── presence.ts              identity-by-client-ID + awareness publish + footer renderer + setupName (localStorage-backed)
+│       ├── cursor-overlay.ts        v2.2.0: mirror-div pixel measurement + per-clientID overlay management, rAF-coalesced
 │       └── undo.ts                  Y.UndoManager scoped to localOrigin + Ctrl/Cmd+Z handler
 └── tests/
     ├── unit/                        vitest: diff + Y.Text round-trip + URL parser + presence identity
-    └── e2e/                         playwright: baseline + F1-F4 (V1→V2 inversions) + F8-F11 (v2.1.0 features)
+    └── e2e/                         playwright: baseline + F1-F4 (V1→V2 inversions) + F8-F11 (v2.1.0) + F12-F13 (v2.2.0)
 ```
 
 ## Why these decisions
@@ -156,11 +185,26 @@ connects to `/ws/<room>`; the page reads the room from
 trigger a full page reload — hot-swapping rooms without recreating the
 provider, IndexeddbPersistence, and binding is v2.2.0+.
 
-**Text-only presence in v2.1.0; visual overlays deferred (v2.1.0).**
-The awareness channel is published with `{ name, color, cursor }`; the
-footer shows it as text (`Alice-042 @12`). Visual cursor overlays
-inside the textarea need pixel-from-character-offset measurement
-against a hidden mirror div — real UI work, deferred to v2.2.0.
+**Visual cursor overlays via mirror div (v2.2.0).** Textareas don't
+expose Range or `getClientRects()`, so converting a character offset
+to pixel coordinates requires a hidden `<div>` whose computed style
+(font, padding, border, line-height, white-space, width) is copied
+from the textarea. Inserting `value.slice(0, offset)` plus a
+zero-width marker `<span>` into that mirror lets the client read
+`getBoundingClientRect()` on the marker and subtract the textarea's
+own rect + scroll to get the visible overlay position. Re-renders
+coalesce via `requestAnimationFrame` on three triggers: local input
+(line wraps shift), `window.resize` (textarea width changes wraps),
+and any awareness mutation. The local user's own cursor is **not**
+overlaid — the textarea's native caret is sufficient and overlapping
+the two would look broken (DOC-136).
+
+**User-supplied names in `localStorage` (v2.2.0).** A header input
+mirrors the awareness `name` field; changes are debounced 150 ms and
+persisted under `collab-editor:name`. Per-browser, not server-side —
+v2.2.0 has no auth, so server-side identity wouldn't help anyway.
+Color stays auto-derived from the client ID; user-picked colors are
+deferred indefinitely.
 
 **`Y.UndoManager` scoped to local origin (v2.1.0).** Local-edit
 transactions are tagged with a module-level `localOrigin` symbol
@@ -184,7 +228,7 @@ test that catches it.
 | `v1.0.0` ✅ | Naive baseline | WebSocket + last-write-wins + in-memory + single doc. F1 chaos test asserts divergence. |
 | `v2.0.0` ✅ | CRDT + persistence | Yjs + y-websocket + y-leveldb. F1 inverted to converge; F2 offline reconcile; F3 cursor preserved; F4 persist across restart. |
 | `v2.1.0` ✅ | Multi-doc + presence + undo + offline-first | Room routing (`/ws/<room>`, `/#<room>`); awareness footer; `Y.UndoManager`; `y-indexeddb`. F8-F11 feature tests. |
-| `v2.2.0` | Portfolio | Visual cursor overlays; user-supplied names; deploy to Fly.io / Railway with a public URL. |
+| `v2.2.0` ✅ | Visual presence + user-supplied names | Cursor overlays via hidden-mirror-div pixel measurement; editable name input persisted in `localStorage`. F12-F13 feature tests. (Deployment to Fly.io / Railway formally skipped — the V1 → v2.2.0 chaos-test diff is the portfolio artifact.) |
 | `v3.0.0` | Editor upgrade | CodeMirror 6 + `y-codemirror.next` if the textarea ergonomics become limiting. |
 
 ## Reading
