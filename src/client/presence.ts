@@ -94,18 +94,34 @@ export function setupPresence(
   // Also clear cursor on blur — selectionchange isn't always reliable on focus exit.
   textarea.addEventListener('blur', () => aw.setLocalStateField('cursor', null));
 
+  // Built with DOM APIs, never innerHTML: every field here arrives off the
+  // wire from other clients and is attacker-controlled regardless of what
+  // OUR types say — pre-fix, a string smuggled into `cursor` (typed
+  // number|null locally, but the wire accepts anything) went through
+  // innerHTML and executed in every viewer of the room (F14). textContent
+  // renders any payload inert; color additionally stays regex-pinned
+  // because it lands in a style attribute.
   const renderFooter = (): void => {
-    const lis: string[] = [];
+    footer.replaceChildren();
     aw.getStates().forEach((state, clientId) => {
       if (clientId === me) return;
       const s = state as Partial<PresenceState>;
-      const cursorTxt =
-        s.cursor === null || s.cursor === undefined ? '·' : `@${s.cursor}`;
-      const safeName = (s.name ?? '?').replace(/[<>&]/g, '');
-      const safeColor = /^#[0-9a-fA-F]{3,8}$/.test(s.color ?? '') ? s.color : '#888';
-      lis.push(`<li><span class="dot" style="background:${safeColor}"></span>${safeName} ${cursorTxt}</li>`);
+      const cursorTxt = Number.isInteger(s.cursor) ? `@${s.cursor}` : '·';
+      const name = String(s.name ?? '?').slice(0, 32);
+      const safeColor = /^#[0-9a-fA-F]{3,8}$/.test(s.color ?? '') ? (s.color as string) : '#888';
+      const li = document.createElement('li');
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = safeColor;
+      li.append(dot, document.createTextNode(`${name} ${cursorTxt}`));
+      footer.append(li);
     });
-    footer.innerHTML = lis.length ? lis.join('') : '<li class="empty">no other clients</li>';
+    if (!footer.hasChildNodes()) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'no other clients';
+      footer.append(li);
+    }
   };
   renderFooter();
   aw.on('change', renderFooter);

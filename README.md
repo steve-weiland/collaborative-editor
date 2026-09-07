@@ -9,7 +9,7 @@ provider.
 | | |
 |--|--|
 | **Spec** | [`spec.md`](./spec.md) — RFC-2119 requirements; V1 → V2 → v2.1.0 → v2.2.0 evolution |
-| **Status** | `v2.2.0` released. V1 failure modes F1-F5 addressed in v2.0.0; v2.1.0 added **multi-doc routing**, **awareness presence**, **`Y.UndoManager`**, and **y-indexeddb offline-first**; v2.2.0 layers **visual cursor overlays** + **user-supplied names** on top. F1-F4 + F8-F13 chaos tests (12 total) lock the surface in. |
+| **Status** | `v2.2.0` released. V1 failure modes F1-F5 addressed in v2.0.0; v2.1.0 added **multi-doc routing**, **awareness presence**, **`Y.UndoManager`**, and **y-indexeddb offline-first**; v2.2.0 layers **visual cursor overlays** + **user-supplied names** on top. F1-F4 + F8-F14 chaos tests (13 total) lock the surface in. |
 | **Stack** | Node.js 20 + TypeScript + Yjs + y-websocket + y-leveldb + y-indexeddb + Vite + vanilla TS frontend |
 
 ---
@@ -82,7 +82,7 @@ npm start            # serves frontend + WebSocket on :3001
 
 ```bash
 npm test             # 22 vitest unit tests (diff + Y.Text round-trip + URL parsing + presence identity)
-npm run test:e2e     # 12 Playwright tests on port 3100 (~5s incl. server boot)
+npm run test:e2e     # 13 Playwright tests on port 3100 (~5s incl. server boot)
                      #   - 2 baseline browser tests
                      #   - F1 concurrent-edit convergence
                      #   - F2 offline-edit reconciliation
@@ -94,6 +94,7 @@ npm run test:e2e     # 12 Playwright tests on port 3100 (~5s incl. server boot)
                      #   - F11 IndexedDB survives reload (v2.1.0)
                      #   - F12 visual cursor overlay rendered for remote (v2.2.0)
                      #   - F13 user-supplied name persists across reload (v2.2.0)
+                     #   - F14 awareness payloads cannot inject HTML (XSS regression guard)
 npm run typecheck    # tsc --noEmit on both client and server
 ```
 
@@ -133,6 +134,7 @@ feature-presence tests that lock in the v2.1.0 surface:
 |---|---------|----------------------|
 | F12 | Visual cursor overlay rendered for remote client | A focuses `#editor` at offset 5; B selects `.cursor-overlay[data-client-id="<A's clientID>"]`, asserts it's visible with non-zero `style.left`/`top`/`height` and a non-empty label. A does **not** render an overlay for its own cursor. |
 | F13 | User-supplied name persists across reload | A types into `#name-input`; B sees the new name on the awareness channel; A reloads; the input value is rehydrated from `localStorage` and the post-reload awareness state still carries the custom name. |
+| F14 | Awareness payloads cannot inject HTML | A hostile raw client publishes `cursor: "<img onerror=…>"` (typed number|null locally — the wire accepts anything). The page renders it inert: no elements created, no script runs. Pre-fix, the footer's `innerHTML` string-building executed it in every viewer. The footer is now DOM-built (`createTextNode`); `color` stays regex-pinned; non-integer cursors render as the idle dot. |
 
 ## Project layout
 

@@ -2,7 +2,7 @@
 
 | Field   | Value         |
 |---------|---------------|
-| Version | 0.4 (draft)   |
+| Version | 0.5              |
 | Author  | Steve Weiland |
 | Date    | 2026-04-24    |
 | Status  | Draft         |
@@ -203,6 +203,7 @@ Requirements use [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) keywords:
 | DOC-134 | Overlay positions **MUST** be re-measured and re-rendered when (a) the local textarea's value changes (because line wrapping shifts every offset), (b) the textarea's size changes (window resize), or (c) any remote awareness state changes. Re-renders **SHOULD** be coalesced via `requestAnimationFrame`. |
 | DOC-135 | When a remote client's awareness state goes away (disconnect or `cursor: null`), the corresponding overlay **MUST** be removed from the DOM. |
 | DOC-136 | The local user's own cursor **MUST NOT** have an overlay rendered (the textarea's native caret is sufficient). |
+| DOC-137 | Awareness state arrives off the wire and is attacker-controlled regardless of local types. Every awareness field rendered into the DOM **MUST** go through DOM APIs (`textContent`/`createTextNode`), never `innerHTML` string-building; `color` **MUST** be regex-validated before landing in a style attribute; a non-integer `cursor` **MUST** render as the idle marker. (F14.) |
 
 ---
 
@@ -329,4 +330,5 @@ single-doc, vanilla TS, single npm package). V2 adds Q12–Q19.
 | 0.1     | 2026-05-01 | Steve Weiland | Initial V1 draft — WebSocket, last-write-wins on full document, in-memory state, single document. F1–F5 documented as deliberate V1 failure modes. |
 | 0.2     | 2026-05-02 | Steve Weiland | V2: Yjs CRDT (Y.Doc + Y.Text), y-websocket binary protocol, y-leveldb persistence, WebsocketProvider reconnect-with-state-sync. F1 inverted (converge), F2 inverted (offline reconcile), F3 inverted (cursor preserved), F4 inverted (persist across restart). New §3.6 / §3.7 / §3.8; OPS-11/12/13/14/21/22/23 rewritten or removed. Resolved Q12–Q19. |
 | 0.3     | 2026-05-02 | Steve Weiland | v2.1.0: multi-doc routing (DOC-03/12/24/25, §3.9), awareness presence (§3.10), `Y.UndoManager` for local-only undo/redo (§3.11), `y-indexeddb` offline-first persistence (§3.12). F8-F11 added as feature-presence tests. Resolved Q20-Q25. |
+| 0.5     | 2026-09-06 | Steve Weiland | Review fix: **XSS via the awareness `cursor` field** (DOC-137). The presence footer built `innerHTML` by string; `name` was stripped and `color` regex-pinned, but `cursor` — typed `number\|null` locally — interpolated raw, and the wire accepts anything: a hostile client's string payload executed in every viewer of the room. Footer rebuilt with DOM APIs; non-integer cursors render as the idle dot. F14 added (red at pre-fix HEAD: the attacker's `<img>` became a live element; sabotage-verified via reintroduced `insertAdjacentHTML`). |
 | 0.4     | 2026-04-24 | Steve Weiland | v2.2.0: visual cursor overlays (§3.13, DOC-130-136), user-supplied names with `localStorage` persistence (DOC-104/105 extending §3.10). DOC-103 (overlays-deferred marker) removed; the v2.1.0 "deferred" line in §5 is replaced with the v2.2.0 in-scope rules + new deferrals (user-picked colors, selection ranges, avatars, blink animation). F12/F13 added. Resolved Q26-Q29. **Deployment to Fly.io / Railway is now formally skipped** rather than deferred — the V1 → v2.2.0 chaos-test evolution is the portfolio artifact. |

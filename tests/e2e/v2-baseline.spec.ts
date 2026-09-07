@@ -562,3 +562,46 @@ test.describe('F13 — user-supplied name', () => {
     }
   });
 });
+
+/* ─── F14 — awareness payloads cannot inject HTML (XSS) ─────────────────── */
+
+test.describe('F14 — awareness payloads cannot inject HTML', () => {
+  test('a malicious cursor/name payload renders as text, never as elements', async ({ page }) => {
+    const room = `f14-${Date.now()}`;
+    await page.goto(`/#${room}`);
+    await waitConnected(page);
+
+    // A hostile "collaborator": raw node-side client, no UI, publishes
+    // attacker-chosen awareness state. cursor is typed as number|null in
+    // OUR code, but the wire accepts anything — pre-fix, a string here
+    // went into footer.innerHTML unsanitized and executed in every
+    // other client viewing the room.
+    const evil = openYjsClient(room);
+    try {
+      await evil.synced;
+      evil.provider.awareness.setLocalStateField('name', 'evil"personX');
+      evil.provider.awareness.setLocalStateField('color', '#abcdef');
+      evil.provider.awareness.setLocalStateField(
+        'cursor',
+        '<img src=x onerror="(window as any).__xss=1">' as unknown as number,
+      );
+
+      // Wait until the hostile client has ARRIVED in the footer — its name
+      // renders as inert text either way (pre-fix innerHTML also passed the
+      // name through), and a non-integer cursor renders as the idle dot.
+      // Then assert the markup payload never became elements or ran.
+      await page.waitForFunction(() => {
+        const f = document.getElementById('presence');
+        return !!f && (f.textContent ?? '').includes('evil"personX');
+      });
+      const injected = await page.evaluate(() => ({
+        imgs: document.querySelectorAll('#presence img').length,
+        xssRan: (window as unknown as { __xss?: number }).__xss ?? 0,
+      }));
+      expect(injected.imgs, 'attacker markup must not become elements').toBe(0);
+      expect(injected.xssRan, 'attacker script must not execute').toBe(0);
+    } finally {
+      evil.provider.destroy();
+    }
+  });
+});
