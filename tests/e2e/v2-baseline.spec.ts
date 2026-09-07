@@ -605,3 +605,76 @@ test.describe('F14 — awareness payloads cannot inject HTML', () => {
     }
   });
 });
+
+
+/* ─── F15 — NAMED rooms persist across restart (v2.1.0 regression) ───────── */
+
+test.describe('F15 — named rooms persist across server restart', () => {
+  const F15_PORT = 3102;
+  const F15_PERSIST = './data/yjs-test-f15';
+
+  function startServer(): Promise<ChildProcess> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('node', ['dist/server/server/index.js'], {
+        cwd: REPO_ROOT,
+        env: { ...process.env, PORT: String(F15_PORT), PERSIST_DIR: F15_PERSIST },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let resolved = false;
+      const onOut = (chunk: Buffer): void => {
+        if (chunk.toString().includes(`listening on :${F15_PORT}`)) {
+          resolved = true;
+          proc.stdout?.off('data', onOut);
+          resolve(proc);
+        }
+      };
+      proc.stdout?.on('data', onOut);
+      proc.on('exit', (code) => {
+        if (!resolved) reject(new Error(`server exited with code ${code} before starting`));
+      });
+      setTimeout(() => {
+        if (!resolved) reject(new Error('server did not announce listening within 10s'));
+      }, 10_000);
+    });
+  }
+
+  function killServer(proc: ChildProcess): Promise<void> {
+    return new Promise((resolve) => {
+      if (proc.exitCode !== null) return resolve();
+      proc.once('exit', () => resolve());
+      proc.kill('SIGTERM');
+      setTimeout(() => proc.kill('SIGKILL'), 3_000);
+    });
+  }
+
+  test.beforeEach(() => {
+    rmSync(path.join(REPO_ROOT, F15_PERSIST), { recursive: true, force: true });
+  });
+
+  test('a non-default room written just before SIGTERM survives a respawn', async () => {
+    let server = await startServer();
+    try {
+      // NO settle delay before the kill: the shutdown flush (which pre-fix
+      // covered only room 'doc') is what must save these pending writes.
+      let c = openYjsClient('f15-meeting-notes', F15_PORT);
+      await c.synced;
+      c.ytext.insert(0, 'named-room-preserved');
+      c.provider.destroy();
+
+      await killServer(server);
+
+      server = await startServer();
+      c = openYjsClient('f15-meeting-notes', F15_PORT);
+      await c.synced;
+      await waitFor(
+        () => c.ytext.toString() === 'named-room-preserved',
+        5_000,
+        'named room loaded from leveldb after restart',
+      );
+      expect(c.ytext.toString()).toBe('named-room-preserved');
+      c.provider.destroy();
+    } finally {
+      await killServer(server);
+    }
+  });
+});

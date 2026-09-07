@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { parseRoomFromUrl } from './url.js';
+import { flushAllDocs } from './shutdown.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const PERSIST_DIR = process.env.PERSIST_DIR ?? './data/yjs';
@@ -79,7 +80,9 @@ const httpServer = http.createServer((req, res) => {
 
 // v2.1.0: extract the room name from the URL path; reject malformed names
 // with HTTP 400. /ws → 'doc' (back-compat); /ws/foo → 'foo'.
-const wss = new WebSocketServer({ noServer: true });
+// maxPayload: ws defaults to 100 MiB per message — one hostile frame could
+// balloon server memory. 1 MiB is generous for any realistic doc update.
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
 httpServer.on('upgrade', (req, socket, head) => {
   const room = parseRoomFromUrl(req.url ?? '');
@@ -110,7 +113,11 @@ async function shutdown(): Promise<void> {
     const persistence = utils.getPersistence?.();
     const provider = persistence?.provider;
     if (provider?.flushDocument) {
-      await provider.flushDocument('doc');
+      // EVERY open room — flushing only 'doc' was the v2.1.0 regression
+      // that reopened F4's race for named rooms (see shutdown.ts).
+      const names: Iterable<string> = utils.docs?.keys?.() ?? ['doc'];
+      const flushed = await flushAllDocs(provider, names);
+      console.log(`flushed ${flushed.length} doc(s): ${flushed.join(', ')}`);
     }
     if (provider?.destroy) {
       await provider.destroy();
