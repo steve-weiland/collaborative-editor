@@ -1,6 +1,6 @@
 {
   "name": "collaborative-editor",
-  "version": "1.0.0",
+  "version": "2.3.0",
   "private": true,
   "type": "module",
   "description": "Real-time collaborative text editor — V1 (WebSocket + last-write-wins) intentionally broken to drive V2 (CRDT)",

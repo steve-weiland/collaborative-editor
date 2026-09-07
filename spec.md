@@ -4,8 +4,8 @@
 |---------|---------------|
 | Version | 0.6              |
 | Author  | Steve Weiland |
-| Date    | 2026-04-24    |
-| Status  | Draft         |
+| Date    | 2026-09-06    |
+| Status  | Current       |
 
 ---
 
